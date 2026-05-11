@@ -650,17 +650,21 @@ def stage2_geocode_and_filter(molit_df, budget_manwon, kakao_local_key):
 def load_housing_data(csv_path):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"주거비 CSV 없음: {csv_path}")
-    for enc in ["utf-8-sig", "cp949", "euc-kr"]:
-        try:
-            df = pd.read_csv(csv_path, encoding=enc)
-            break
-        except UnicodeDecodeError:
-            continue
+    # gz 파일은 pandas가 자동 압축 해제 — encoding만 지정
+    if str(csv_path).endswith(".gz"):
+        df = pd.read_csv(csv_path, encoding="utf-8", encoding_errors="replace")
     else:
-        import io as _io
-        with open(csv_path, "rb") as _f:
-            _content = _f.read().decode("utf-8-sig", errors="replace")
-        df = pd.read_csv(_io.StringIO(_content))
+        for enc in ["utf-8-sig", "cp949", "euc-kr"]:
+            try:
+                df = pd.read_csv(csv_path, encoding=enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            import io as _io
+            with open(csv_path, "rb") as _f:
+                _content = _f.read().decode("utf-8-sig", errors="replace")
+            df = pd.read_csv(_io.StringIO(_content))
     required = ["시도","시군구_2","읍면동","환산보증금(만원)","㎡당환산보증금_재계산(만원)"]
     missing  = [c for c in required if c not in df.columns]
     if missing: raise ValueError(f"CSV 필수 컬럼 없음: {missing}")
