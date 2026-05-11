@@ -622,8 +622,18 @@ def fetch_molit_rentals(gu_name, dong_name, n_months=MOLIT_RECENT_MONTHS,
     return df.reset_index(drop=True)
 
 
-def stage2_geocode_and_filter(molit_df, budget_manwon, kakao_local_key):
+def stage2_geocode_and_filter(molit_df, budget_manwon, kakao_local_key,
+                               rent_type: str = "", monthly_rent_manwon: float = 0.0):
     if molit_df.empty: return molit_df
+    # 계약 유형 필터 (월세/전세 구분)
+    if rent_type in ("월세", "전세") and "rent_type" in molit_df.columns:
+        molit_df = molit_df[molit_df["rent_type"] == rent_type].copy()
+    if molit_df.empty: return molit_df
+    # 월세 금액 필터
+    if rent_type == "월세" and monthly_rent_manwon > 0 and "monthly_rent_manwon" in molit_df.columns:
+        molit_df = molit_df[molit_df["monthly_rent_manwon"] <= monthly_rent_manwon].copy()
+    if molit_df.empty: return molit_df
+    # 환산보증금 예산 필터
     if budget_manwon is not None:
         molit_df = molit_df[molit_df["conv_deposit_manwon"] <= budget_manwon].copy()
     if molit_df.empty: return molit_df
@@ -1579,7 +1589,12 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
             print(f"  [{gu_name} {dong_name}] 국토부 API 매물 없음")
             continue
 
-        molit_geo = stage2_geocode_and_filter(molit_df, budget_manwon, KAKAO_LOCAL_REST_API_KEY)
+        rent_type_for_filter = "월세" if monthly_rent_manwon > 0 else "전세"
+        molit_geo = stage2_geocode_and_filter(
+            molit_df, budget_manwon, KAKAO_LOCAL_REST_API_KEY,
+            rent_type=rent_type_for_filter,
+            monthly_rent_manwon=monthly_rent_manwon,
+        )
         if molit_geo.empty or "geocode_ok" not in molit_geo.columns:
             print(f"  [{gu_name} {dong_name}] 지오코딩 결과 없음 (예산 필터 또는 빈 응답)")
             continue

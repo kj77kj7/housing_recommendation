@@ -854,6 +854,14 @@ class ChatBot:
             if not self._parse_weight_choice(user_text):
                 new_slots.pop("weight_preference", None)
 
+        # ── monthly_manwon LLM 결과 검증 및 보정 ────────────
+        # LLM이 숫자를 잘못 해석할 수 있으므로(예: "200만원" → 20),
+        # 직접 파싱(_parse_manwon)이 성공하면 그 값으로 덮어씀.
+        if self._last_asked_slot == "monthly_manwon":
+            direct = _parse_manwon(user_text.strip())
+            if direct is not None:
+                new_slots["monthly_manwon"] = direct
+
         # ── 컨텍스트 인식 폴백 ──────────────────────────────
         # 봇이 직전에 특정 슬롯을 물어봤는데 LLM이 그 슬롯을 못 잡은 경우,
         # 사용자 발화를 해당 슬롯 값으로 직접 사용
