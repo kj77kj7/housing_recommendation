@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -31,6 +32,10 @@ from pydantic import BaseModel
 # 프로젝트 루트를 sys.path에 추가 (상위 폴더의 모듈 import)
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+# .env 로딩 (auth.py 등이 os.getenv 로 읽기 전에 호출되어야 함)
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
 
 from nlp_input_module import ChatBot
 from expense_module import (
@@ -55,6 +60,25 @@ async def lifespan(app: FastAPI):
 
 # ──────────────────────────────────────────────────────────
 app = FastAPI(title="집찾봇 API", lifespan=lifespan)
+
+# ── CORS (운영: Cloudflare Pages 도메인 / 로컬: 모두 허용) ─
+# CORS_ORIGINS 환경변수에 쉼표로 구분된 도메인 목록 입력.
+# 예: CORS_ORIGINS=https://myapp.pages.dev,https://www.myapp.com
+# 미설정 시 모든 출처 허용 (개발용).
+_cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
+if _cors_origins_env:
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+else:
+    _cors_origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(auth_router,      prefix="/auth",      tags=["인증"])
 app.include_router(password_router,  prefix="/password",  tags=["비밀번호"])
 app.include_router(user_router,      prefix="/user",      tags=["유저"])
@@ -175,11 +199,16 @@ async def recommend(req: RecommendRequest):
     v5_params = bot.get_v5_params()
 
     import glob as glob_mod
-    csv_files = sorted(glob_mod.glob(str(ROOT / "사용_csv_모음" / "*주거비*.csv")))
-    if not csv_files:
+    # 원본 .csv 우선 (로컬에서 빠른 처리), 없으면 .csv.gz (배포 환경 — GitHub 100MB 한도 회피용).
+    # pandas 는 .gz 확장자 자동 감지.
+    gz_files   = sorted(glob_mod.glob(str(ROOT / "사용_csv_모음" / "*주거비*.csv.gz")))
+    csv_files  = sorted(glob_mod.glob(str(ROOT / "사용_csv_모음" / "*주거비*.csv")))
+    raw_csv    = [f for f in csv_files if not f.endswith(".gz")]
+    candidates = raw_csv + gz_files
+    if not candidates:
         return JSONResponse(status_code=500, content={"error": "주거지 CSV 없음"})
 
-    csv_path = csv_files[0]
+    csv_path = candidates[0]
 
     # stdout 캡처
     log_buf = io.StringIO()

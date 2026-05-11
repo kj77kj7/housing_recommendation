@@ -58,7 +58,8 @@ SEOUL_AVG_RENT_FALLBACK = 500_000    # 서울 매물 DB 미발견 시 fallback (
 # 전처리 산출물 / 매물 DB
 DATA_DIR    = ROOT / "data"
 SALES_CSV   = DATA_DIR / "sales_q4_processed.csv"
-HOUSING_CSV_GLOB = "사용_csv_모음/*주거비*.csv"   # 서울 매물 DB (lazy 평균 계산용)
+HOUSING_CSV_GLOB = "사용_csv_모음/*주거비*.csv"      # 서울 매물 DB (lazy 평균 계산용)
+HOUSING_CSV_GZ_GLOB = "사용_csv_모음/*주거비*.csv.gz"  # 배포용 압축본 (pandas 자동 감지)
 
 
 # ─────────────────────────────────────────────────────────
@@ -104,7 +105,10 @@ def _seoul_avg_rent_won() -> int:
         return _SEOUL_AVG_RENT_WON_CACHE
 
     import glob as _glob
-    paths = sorted(_glob.glob(str(ROOT / HOUSING_CSV_GLOB)))
+    # 원본 .csv 우선 (로컬에서 빠른 처리), 없으면 .csv.gz (배포 환경용; pandas 가 .gz 자동 감지)
+    gz_paths  = sorted(_glob.glob(str(ROOT / HOUSING_CSV_GZ_GLOB)))
+    csv_paths = sorted(_glob.glob(str(ROOT / HOUSING_CSV_GLOB)))
+    paths = [p for p in csv_paths if not p.endswith(".gz")] + gz_paths
     if not paths:
         _SEOUL_AVG_RENT_WON_CACHE = SEOUL_AVG_RENT_FALLBACK
         return _SEOUL_AVG_RENT_WON_CACHE

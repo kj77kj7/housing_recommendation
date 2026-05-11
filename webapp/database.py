@@ -1,9 +1,13 @@
 """
 webapp/database.py
 ──────────────────
-SQLite (Python 내장) 기반 DB 초기화 + CRUD 헬퍼
-SQLAlchemy 미사용 (greenlet/C++ 컴파일러 회피)
-DBeaver 등 GUI 툴로 housing.db 파일 직접 열어서 확인 가능.
+MySQL 기반 DB 초기화 + CRUD 헬퍼
+SQLAlchemy 미사용 (greenlet/C++ 컴파일러 회피).
+PyMySQL + 호환 어댑터로 기존 sqlite3 스타일 API (`?` 파라미터, dict 접근) 유지.
+
+환경변수:
+  DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+  또는 DATABASE_URL (mysql://user:pw@host:port/db) — Railway 등 배포 환경용
 
 테이블:
   users                  - 회원 (이메일/비밀번호 + 카카오 OAuth)
@@ -12,23 +16,112 @@ DBeaver 등 GUI 툴로 housing.db 파일 직접 열어서 확인 가능.
   search_conditions      - 저장된 검색조건
   recommendation_history - 추천 이력
 """
-import sqlite3
-from pathlib import Path
+import os
+from urllib.parse import urlparse
 
-DB_PATH = Path(__file__).parent / "housing.db"
+import pymysql
+from pymysql.cursors import DictCursor
+from pymysql.err import IntegrityError as _PyMySQLIntegrityError
+
+# 외부에서 `from webapp.database import IntegrityError` 로 잡을 수 있도록 export
+IntegrityError = _PyMySQLIntegrityError
+
+
+# ── 연결 파라미터 ────────────────────────────────────────
+def _db_params() -> dict:
+    """DATABASE_URL 우선, 없으면 개별 환경변수."""
+    url = os.getenv("DATABASE_URL", "").strip()
+    if url:
+        u = urlparse(url)
+        return {
+            "host":     u.hostname or "localhost",
+            "port":     u.port or 3306,
+            "user":     u.username or "root",
+            "password": u.password or "",
+            "db":       (u.path or "/").lstrip("/") or "housing",
+            "charset":  "utf8mb4",
+        }
+    return {
+        "host":     os.getenv("DB_HOST", "localhost"),
+        "port":     int(os.getenv("DB_PORT", "3306")),
+        "user":     os.getenv("DB_USER", "root"),
+        "password": os.getenv("DB_PASSWORD", ""),
+        "db":       os.getenv("DB_NAME", "housing"),
+        "charset":  "utf8mb4",
+    }
+
+
+# ── sqlite3 호환 어댑터 ─────────────────────────────────
+# 기존 코드(`?` 파라미터, `conn.execute(sql, p).fetchone()` 패턴, `row["col"]` 접근)를
+# 손대지 않고 MySQL 위에서 동작시키기 위한 얇은 래퍼.
+class _CursorWrapper:
+    def __init__(self, real_cur):
+        self._c = real_cur
+
+    def execute(self, sql, params=()):
+        # SQLite 스타일 `?` → MySQL 스타일 `%s` 변환
+        self._c.execute(sql.replace("?", "%s"), params)
+        return self
+
+    def fetchone(self):
+        return self._c.fetchone()
+
+    def fetchall(self):
+        return self._c.fetchall()
+
+    @property
+    def lastrowid(self):
+        return self._c.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._c.rowcount
+
+    def close(self):
+        self._c.close()
+
+
+class _ConnWrapper:
+    def __init__(self, real_conn):
+        self._conn = real_conn
+
+    def cursor(self):
+        return _CursorWrapper(self._conn.cursor(DictCursor))
+
+    def execute(self, sql, params=()):
+        # sqlite3 패턴: conn.execute(...).fetchone()
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """기존 sqlite3.connect()와 동일한 사용감으로 MySQL 연결 반환."""
+    real_conn = pymysql.connect(autocommit=False, **_db_params())
+    return _ConnWrapper(real_conn)
 
 
+# ── 컬럼 존재 확인 (MySQL: INFORMATION_SCHEMA) ──────────
 def _column_exists(cur, table: str, col: str) -> bool:
-    cur.execute(f"PRAGMA table_info({table})")
-    return any(row[1] == col for row in cur.fetchall())
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? "
+        "LIMIT 1",
+        (table, col),
+    )
+    return cur.fetchone() is not None
 
 
+# ── 스키마 초기화 ───────────────────────────────────────
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -36,93 +129,94 @@ def init_db():
     # ── users ──────────────────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            email       TEXT UNIQUE,
-            password    TEXT,
-            birth_date  TEXT,                                    -- YYYY-MM-DD
-            gender      TEXT,                                    -- 'M'/'F'
-            kakao_id    TEXT UNIQUE,
-            nickname    TEXT,
-            created_at  TEXT DEFAULT (datetime('now')),
-            updated_at  TEXT DEFAULT (datetime('now'))
-        )
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            email       VARCHAR(255) UNIQUE,
+            password    VARCHAR(255),
+            birth_date  VARCHAR(10),                                 -- YYYY-MM-DD
+            gender      VARCHAR(2),                                  -- 'M'/'F'
+            kakao_id    VARCHAR(50) UNIQUE,
+            nickname    VARCHAR(100),
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
-    # 기존 테이블 마이그레이션
     if not _column_exists(cur, "users", "kakao_id"):
-        cur.execute("ALTER TABLE users ADD COLUMN kakao_id TEXT")
+        cur.execute("ALTER TABLE users ADD COLUMN kakao_id VARCHAR(50)")
     if not _column_exists(cur, "users", "updated_at"):
-        cur.execute("ALTER TABLE users ADD COLUMN updated_at TEXT")
+        cur.execute("ALTER TABLE users ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
     if not _column_exists(cur, "users", "employment"):
-        cur.execute("ALTER TABLE users ADD COLUMN employment TEXT")  # 취업상태
+        cur.execute("ALTER TABLE users ADD COLUMN employment VARCHAR(20)")   # 취업상태
     if not _column_exists(cur, "users", "education"):
-        cur.execute("ALTER TABLE users ADD COLUMN education TEXT")   # 학력
+        cur.execute("ALTER TABLE users ADD COLUMN education VARCHAR(20)")    # 학력
 
     # ── user_profile ──────────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_profile (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id           INTEGER NOT NULL REFERENCES users(id),
-            employment_status TEXT,
-            education_level   TEXT,
-            marriage_status   TEXT,
-            has_own_house     INTEGER DEFAULT 0,
-            income_range      TEXT,
-            asset_range       TEXT,
-            last_updated      TEXT DEFAULT (datetime('now'))
-        )
+            id                INT AUTO_INCREMENT PRIMARY KEY,
+            user_id           INT NOT NULL,
+            employment_status VARCHAR(20),
+            education_level   VARCHAR(20),
+            marriage_status   VARCHAR(20),
+            has_own_house     TINYINT DEFAULT 0,
+            income_range      VARCHAR(50),
+            asset_range       VARCHAR(50),
+            last_updated      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
 
     # ── checklist_items ───────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS checklist_items (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER NOT NULL,
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            user_id     INT NOT NULL,
             content     TEXT,
-            is_checked  INTEGER DEFAULT 0,                       -- 0=미완료, 1=완료
-            is_default  INTEGER DEFAULT 0,                       -- 0=사용자, 1=기본
-            category    TEXT,                                    -- 이사전/이사당일/이사후
-            created_at  TEXT DEFAULT (datetime('now'))
-        )
+            is_checked  TINYINT DEFAULT 0,                           -- 0=미완료, 1=완료
+            is_default  TINYINT DEFAULT 0,                           -- 0=사용자, 1=기본
+            category    VARCHAR(20),                                 -- 이사전/이사당일/이사후
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
 
     # ── search_conditions ─────────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS search_conditions (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER NOT NULL,
-            workplace       TEXT,
-            transport       TEXT,
-            contract_type   TEXT,
-            deposit         INTEGER,
-            monthly_rent    INTEGER,
-            commute_time    INTEGER,
-            preferred_area  TEXT,
-            departure_time  TEXT,
-            arrival_time    TEXT,
-            house_type      TEXT,
-            priority        TEXT,
+            id              INT AUTO_INCREMENT PRIMARY KEY,
+            user_id         INT NOT NULL,
+            workplace       VARCHAR(255),
+            transport       VARCHAR(50),
+            contract_type   VARCHAR(20),
+            deposit         INT,
+            monthly_rent    INT,
+            commute_time    INT,
+            preferred_area  VARCHAR(255),
+            departure_time  VARCHAR(20),
+            arrival_time    VARCHAR(20),
+            house_type      VARCHAR(50),
+            priority        VARCHAR(255),
             amenities       TEXT,
-            youth_policy    INTEGER,
-            age             INTEGER,
-            created_at      TEXT DEFAULT (datetime('now'))
-        )
+            youth_policy    TINYINT,
+            age             INT,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
 
     # ── recommendation_history ────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS recommendation_history (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER NOT NULL,
-            workplace     TEXT,
-            contract_type TEXT,
-            budget        TEXT,
-            commute_time  INTEGER,
-            result_count  INTEGER,
+            id            INT AUTO_INCREMENT PRIMARY KEY,
+            user_id       INT NOT NULL,
+            workplace     VARCHAR(255),
+            contract_type VARCHAR(20),
+            budget        VARCHAR(100),
+            commute_time  INT,
+            result_count  INT,
             top_result    TEXT,
-            created_at    TEXT DEFAULT (datetime('now'))
-        )
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
 
     conn.commit()
     conn.close()
-    print(f"[DB] 초기화 완료: {DB_PATH}")
+    params = _db_params()
+    print(f"[DB] 초기화 완료: mysql://{params['user']}@{params['host']}:{params['port']}/{params['db']}")

@@ -136,7 +136,7 @@ async function sendMessage(text) {
   setWaiting(true);
 
   try {
-    const res  = await fetch("/api/chat", {
+    const res  = await fetch((window.API_BASE || "") + "/api/chat", {
       method:  "POST",
       headers: getAuthHeaders(),
       body:    JSON.stringify({ user_message: userText, session_id: sessionId }),
@@ -177,7 +177,7 @@ async function startRecommendation(sid) {
   setWaiting(true);
 
   try {
-    const res  = await fetch("/api/recommend", {
+    const res  = await fetch((window.API_BASE || "") + "/api/recommend", {
       method:  "POST",
       headers: getAuthHeaders(),
       body:    JSON.stringify({ session_id: sid }),

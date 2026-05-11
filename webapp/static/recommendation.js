@@ -97,7 +97,7 @@ document.addEventListener("DOMContentLoaded", () => {
 async function loadResults(sessionId) {
   showState("loading");
   try {
-    const res  = await fetch("/api/recommend", {
+    const res  = await fetch((window.API_BASE || "") + "/api/recommend", {
       method:  "POST",
       headers: getAuthHeaders(),
       body:    JSON.stringify({ session_id: sessionId }),
@@ -614,7 +614,7 @@ async function renderModalExpense(r, idx) {
 }
 
 async function fetchExpense(r) {
-  const res = await fetch("/api/expense", {
+  const res = await fetch((window.API_BASE || "") + "/api/expense", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

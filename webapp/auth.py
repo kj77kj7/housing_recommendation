@@ -7,7 +7,6 @@ webapp/auth.py
 JWT 토큰에 birth_date, gender, nickname 포함 → 청년정책 1차 적용용
 """
 import os
-import sqlite3
 from datetime import datetime, timedelta, date
 from typing import Optional
 
@@ -18,7 +17,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from jose import jwt
 
-from webapp.database import get_conn
+from webapp.database import get_conn, IntegrityError
 
 router = APIRouter()
 
@@ -109,7 +108,7 @@ def signup(req: SignupRequest):
         )
         conn.commit()
         user_id = cur.lastrowid
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         raise HTTPException(status_code=400, detail="이미 사용 중인 이메일입니다")
     finally:
         conn.close()

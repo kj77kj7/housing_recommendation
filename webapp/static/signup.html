@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>회원가입 — 집찾봇</title>
   <link rel="stylesheet" href="/static/auth.css" />
+  <script src="/static/config.js"></script>
 </head>
 <body>
 <div class="auth-container" style="overflow-y:auto;">
@@ -152,7 +153,7 @@
     if (!education)                  { showErr('최종 학력을 선택해주세요'); return; }
 
     try {
-      const res  = await fetch('/auth/signup', {
+      const res  = await fetch(window.API_BASE + '/auth/signup', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ nickname, email, password, birth_date, gender: selectedGender, employment, education }),

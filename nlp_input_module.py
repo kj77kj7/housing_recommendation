@@ -370,6 +370,9 @@ class ChatBot:
         if re.search(r"\b1\b", text): return "오피스텔"
         if re.search(r"\b2\b", text): return "연립다세대"
         if re.search(r"\b3\b", text): return None
+        # 자연어 키워드 매칭 (LLM 추출 후 가드 통과용)
+        if re.search(r"오피스텔", text): return "오피스텔"
+        if re.search(r"연립|다세대|빌라", text): return "연립다세대"
         return None
 
     @classmethod
@@ -407,13 +410,11 @@ class ChatBot:
 
     @staticmethod
     def _validate_work_address(text: str):
-        """(valid: bool, error_msg: str). 역명·건물명 입력 거부."""
+        """(valid: bool, error_msg: str). 건물명 입력 거부.
+
+        역명은 카카오 키워드 검색으로 좌표 조회 가능하므로 허용 (출구 무관, 역 중심 좌표 사용).
+        """
         stripped = text.strip()
-        if re.search(r"[가-힣]+역$", stripped) or re.search(r"[가-힣]+역\s", stripped):
-            return False, (
-                f"'{stripped}'은 역 이름이에요. 근처 도로명 주소를 입력해 주세요.\n"
-                "(예: 강남구 테헤란로 521, 서초구 강남대로 373)"
-            )
         if re.search(r"(코엑스|타워|몰|센터|빌딩|광장|마트|쇼핑|터미널)$", stripped.replace(" ", "")):
             return False, (
                 f"'{stripped}'은 건물·시설 이름이에요. 실제 도로명 주소를 입력해 주세요.\n"
@@ -925,10 +926,6 @@ class ChatBot:
             if parsed:
                 new_slots["weight_preference"] = parsed
 
-        # 주소 검증 실패 시 즉시 반환 (슬롯 미병합)
-        if _addr_err:
-            return _addr_err, False, None
-
         if self._asked_vibe and self.slots.get("vibe") is None and new_slots.get("vibe") is None:
             parsed = self._parse_vibe_choice(user_text)
             if parsed:
@@ -955,6 +952,11 @@ class ChatBot:
         # house_type 스킵 처리 — 필수에서 제외
         if self.slots.get("house_type") == "__skip__":
             self.slots["house_type"] = None  # 실제 v5에는 None 전달
+
+        # 주소 검증 실패 시 다른 슬롯은 저장하되 work_address만 다시 묻기
+        # (사용자 발화에서 LLM이 추출한 transport_mode·house_type 등을 보존해 UX 개선)
+        if _addr_err:
+            return _addr_err, False, None
 
         # 다음 질문 (v6.0 — 카드 단계 제거됨)
         next_q = self._next_question()
