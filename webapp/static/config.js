@@ -8,4 +8,4 @@
  *
  * 배포 시:  window.API_BASE = "https://your-app.up.railway.app";
  */
-window.API_BASE = "";
+window.API_BASE = "https://housingrecommendation-production.up.railway.app";
