@@ -92,8 +92,9 @@ body {
 /* ── 오른쪽 패널 ──────────────────────────────────── */
 .auth-right {
   flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 40px 20px;
   overflow-y: auto;
