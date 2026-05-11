@@ -305,14 +305,47 @@ def geocode_address_kakao(address, kakao_local_key):
     return float(doc["x"]), float(doc["y"]), matched
 
 
+def geocode_keyword_kakao(query, kakao_local_key, category_code=None):
+    """카카오 키워드 검색으로 장소 좌표 조회 (역명·건물명 등).
+
+    address.json은 도로명/지번 주소만 처리하므로, 역명("강남역")처럼 장소명은
+    keyword.json 엔드포인트로 조회한다. category_group_code=SW8은 지하철역.
+    """
+    require_key("KAKAO_LOCAL_REST_API_KEY", kakao_local_key)
+    params = {"query": query, "size": 1}
+    if category_code:
+        params["category_group_code"] = category_code
+    resp = _kakao_request(
+        "Kakao Local Keyword",
+        "https://dapi.kakao.com/v2/local/search/keyword.json",
+        headers={"Authorization": f"KakaoAK {kakao_local_key}"},
+        params=params,
+    )
+    if resp.status_code != 200:
+        raise APIError(f"[Kakao Keyword] HTTP {resp.status_code}: {truncate_text(resp.text)}")
+    docs = ensure_list(safe_get(resp.json(), "documents", []))
+    if not docs or not isinstance(docs[0], dict):
+        raise APIError(f"[Kakao Keyword] 좌표 조회 실패: {query}")
+    doc = docs[0]
+    matched = safe_get(doc, "place_name", query) or query
+    return float(doc["x"]), float(doc["y"]), matched
+
+
 def geocode_address_kakao_with_fallback(address, kakao_local_key):
     """
-    1차: clean_work_address 적용 후 시도
-    2차: 마지막 토큰 잘라가며 재시도 (최소 3토큰)
+    1차: clean_work_address 적용 후 도로명/지번 주소 검색
+    2차: 역명 패턴이면 키워드 검색 (지하철역 카테고리)
+    3차: 일반 키워드 검색
+    4차: 마지막 토큰 잘라가며 재시도 (최소 3토큰)
     모두 실패 시 APIError raise
     """
     cleaned = clean_work_address(address)
-    # 1차 시도
+    # 서울 한정 — "○○역" 단독 입력(출구 미지정)은 카카오 주소 DB의
+    # "○○역 1번출구"로 치환하여 1차 주소 검색에서 잡히게 함.
+    # (역명 키워드 검색 fallback 회피 → 카카오 API 호출 1회로 끝남)
+    if re.search(r"[가-힣]+역\s*$", cleaned) and "출구" not in cleaned:
+        cleaned = cleaned.rstrip() + " 1번출구"
+    # 1차 시도 — 도로명/지번 주소
     try:
         return geocode_address_kakao(cleaned, kakao_local_key)
     except APIError:
@@ -323,7 +356,18 @@ def geocode_address_kakao_with_fallback(address, kakao_local_key):
             return geocode_address_kakao(address, kakao_local_key)
         except APIError:
             pass
-    # 2차: 토큰 줄여가며 재시도
+    # 2차: 역명 패턴 → 지하철역 카테고리 검색 (출구 무관, 역 중심 좌표)
+    if re.search(r"[가-힣]+역(\s|$)", cleaned):
+        try:
+            return geocode_keyword_kakao(cleaned, kakao_local_key, category_code="SW8")
+        except APIError:
+            pass
+    # 3차: 일반 키워드 검색 (건물명·장소명)
+    try:
+        return geocode_keyword_kakao(cleaned, kakao_local_key)
+    except APIError:
+        pass
+    # 4차: 토큰 줄여가며 재시도
     tokens = cleaned.split()
     while len(tokens) >= 3:
         tokens = tokens[:-1]
@@ -1695,6 +1739,36 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
             combined["commute_score"].fillna(0)*weight_commute
             + combined["housing_score"].fillna(0)*weight_housing
         ).round(2)
+        # ── fallback에서도 매물 좌표 노출 (영수증 모듈 호출용) ───────
+        # _df_to_list가 cand_y/cand_x를 lat/lon으로 읽으므로, 동 중심 좌표를 매핑
+        combined["cand_y"] = combined.get("dong_y")
+        combined["cand_x"] = combined.get("dong_x")
+        # ── fallback에서도 청년정책 매칭 (자치구+임대유형 기준이라 동 단위에서도 동작) ──
+        rent_type_label_fb = "월세" if monthly_rent_manwon > 0 else "전세"
+        if user_info and is_youth_api_configured():
+            print(f"  [fallback] 청년정책 매칭 중... (rent_type={rent_type_label_fb})")
+            fb_lists, fb_totals = [], []
+            fb_cache: dict = {}
+            for _, row in combined.iterrows():
+                gu = str(row.get("시군구_2", "")).strip()
+                key = (gu, rent_type_label_fb)
+                if key not in fb_cache:
+                    try:
+                        pol_list, pol_total = match_policies_for_property(
+                            gu, rent_type_label_fb, user_info, top_n=100
+                        )
+                        fb_cache[key] = (pol_list, pol_total)
+                    except Exception as e:
+                        print(f"  [정책 매칭 오류] {gu}: {str(e)[:80]}")
+                        fb_cache[key] = ([], 0)
+                pol_list, pol_total = fb_cache[key]
+                fb_lists.append(pol_list)
+                fb_totals.append(pol_total)
+            combined["applicable_policies"]       = fb_lists
+            combined["applicable_policies_total"] = fb_totals
+        else:
+            combined["applicable_policies"]       = [[] for _ in range(len(combined))]
+            combined["applicable_policies_total"] = [0 for _ in range(len(combined))]
 
     # 중복 제거 및 최종
     if "display_address" not in combined.columns:

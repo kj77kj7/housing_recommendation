@@ -115,12 +115,22 @@ def call_gemini(system_prompt: str, user_message: str) -> Optional[str]:
         except Exception as e:
             err_str = str(e)
             if "429" in err_str:
-                if "daily" in err_str.lower() or "quota" in err_str.lower():
+                low = err_str.lower()
+                # 분당/일일 구분: per-day/daily 마커가 있으면 일일, 그 외 quota 메시지는 분당으로 간주
+                # Gemini는 분당 초과 시에도 "Quota exceeded" 표현을 쓰므로 'quota'만으로 일일 판정 불가
+                is_daily = ("per_day" in low) or ("perday" in low) or ("daily" in low)
+                if is_daily:
                     print(f"[LLM] 일일 한도 초과, 폴백")
                     return None
-                print(f"[LLM] 분당 한도, 4초 대기 후 재시도")
-                time.sleep(4)
-                continue
+                # 분당 한도 — 응답에 'retry in Ns' 힌트가 있으면 그만큼 대기 (상한 10s)
+                m = re.search(r"retry\s+in\s+([\d.]+)s", err_str.lower())
+                wait_s = min(float(m.group(1)), 10.0) if m else 4.0
+                if attempt < len(delays):
+                    print(f"[LLM] 분당 한도 초과, {wait_s:.0f}s 후 재시도 (시도 {attempt}/{len(delays)})")
+                    time.sleep(wait_s)
+                    continue
+                print(f"[LLM] 분당 한도 재시도 실패, 폴백")
+                return None
             if attempt < len(delays):
                 print(f"[LLM] 호출 실패 (시도 {attempt}), {delay}s 후 재시도: {err_str[:60]}")
                 time.sleep(delay)
