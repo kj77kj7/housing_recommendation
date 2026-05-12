@@ -249,10 +249,14 @@ class ChatBot:
             self._last_asked_slot = missing[0]
             return SLOT_QUESTIONS[missing[0]]
 
-        # 직접설정 선택 후 비율 입력
+        # 직접설정 선택 후 비율 입력 (10 기준 — 통근/주거비/인프라)
         if self.slots.get("weight_preference") == "직접설정" and self.slots.get("weight_custom") is None:
             self._last_asked_slot = "weight_custom"
-            return "통근과 주거비 비율을 직접 입력해 주세요.\n(예: 통근 70 주거비 30, 또는 7:3)"
+            return (
+                "통근·주거비·인프라 비율을 합 10 기준으로 입력해 주세요.\n"
+                "(예: 통근 6 주거비 3 인프라 1, 또는 6:3:1)\n"
+                "※ 인프라는 동네 분위기를 선택했을 때만 반영됩니다."
+            )
 
         # vibe 확인
         if not self._asked_vibe:
@@ -424,12 +428,17 @@ class ChatBot:
 
     @staticmethod
     def _parse_weight_custom(text: str) -> Optional[List[int]]:
-        """'통근 70 주거비 30' 또는 '7:3' 형식 → [commute, housing]"""
+        """'통근 6 주거비 3 인프라 1' 또는 '6:3:1' 형식 → [commute, housing, infra]
+        2개만 입력 시 [commute, housing] 으로 인프라는 0 처리."""
         nums = re.findall(r"\d+", text)
+        if len(nums) >= 3:
+            a, b, c = int(nums[0]), int(nums[1]), int(nums[2])
+            if a + b + c > 0:
+                return [a, b, c]
         if len(nums) >= 2:
             a, b = int(nums[0]), int(nums[1])
             if a + b > 0:
-                return [a, b]
+                return [a, b, 0]
         return None
 
     @staticmethod
@@ -811,6 +820,9 @@ class ChatBot:
                 self.slots.pop(linked, None)
                 if linked in self._slot_fill_order:
                     self._slot_fill_order.remove(linked)
+        # weight_preference 수정 시 이전 직접설정 비율(weight_custom) 도 함께 초기화
+        if slot == "weight_preference":
+            self.slots.pop("weight_custom", None)
         # use_youth_policy 수정 시 정책 세부 슬롯도 모두 초기화하고 안내·intro 플래그 리셋
         if slot == "use_youth_policy":
             for linked in POLICY_SLOTS:
@@ -882,8 +894,12 @@ class ChatBot:
             new_slots.pop("house_type", None)
         if new_slots.get("weight_preference") is not None and self._last_asked_slot != "weight_preference":
             new_slots.pop("weight_preference", None)
+        if new_slots.get("weight_custom") is not None and self._last_asked_slot != "weight_custom":
+            new_slots.pop("weight_custom", None)
         if new_slots.get("vibe") is not None and self._last_asked_slot != "vibe":
             new_slots.pop("vibe", None)
+        if new_slots.get("use_youth_policy") is not None and self._last_asked_slot != "use_youth_policy":
+            new_slots.pop("use_youth_policy", None)
 
         # ── monthly_manwon LLM 결과 검증 및 보정 ────────────
         # LLM이 숫자를 잘못 해석할 수 있으므로(예: "200만원" → 20),
@@ -1030,8 +1046,11 @@ class ChatBot:
         lines.append(f"- 주택유형: {ht if ht else '상관없음'}")
         wp = s.get("weight_preference", "균형")
         if wp == "직접설정":
-            wc = s.get("weight_custom") or [1, 1]
-            lines.append(f"- 우선순위: 직접설정 (통근 {wc[0]} : 주거비 {wc[1]})")
+            wc = s.get("weight_custom") or [3, 4, 3]
+            if len(wc) >= 3:
+                lines.append(f"- 우선순위: 직접설정 (통근 {wc[0]} : 주거비 {wc[1]} : 인프라 {wc[2]})")
+            else:
+                lines.append(f"- 우선순위: 직접설정 (통근 {wc[0]} : 주거비 {wc[1]})")
         else:
             lines.append(f"- 우선순위: {wp}")
         vibe = s.get("vibe")
@@ -1071,25 +1090,39 @@ class ChatBot:
         vibe       = [v for v in (s.get("vibe") or []) if v]
         use_policy = bool(s.get("use_youth_policy"))
 
-        weight_infra  = 0.2 if vibe else 0.0
+        # ── 가중치 프리셋 (10 기준 — 통근 : 주거비 : 인프라) ──
+        # 통근우선: 6/3/1, 주거비우선: 3/6/1, 균형: 3/4/3, 직접설정: 사용자 입력
+        # vibe 미선택 시 인프라 비중을 0으로 둔 뒤 통근·주거비 비율을 유지하며 재정규화.
+        _WEIGHT_PRESETS = {
+            "통근우선":  (6, 3, 1),
+            "주거비우선": (3, 6, 1),
+            "균형":      (3, 4, 3),
+        }
         weight_policy = 0.0   # v6.0: 정책은 추천 점수 미반영 (표시용 매칭만)
-        remaining     = 1.0 - weight_infra
 
         wp_pref = s.get("weight_preference", "균형")
-        if wp_pref == "통근우선":
-            weight_commute = round(remaining * 0.7, 4)
-            weight_housing = round(remaining * 0.3, 4)
-        elif wp_pref == "주거비우선":
-            weight_commute = round(remaining * 0.3, 4)
-            weight_housing = round(remaining * 0.7, 4)
-        elif wp_pref == "직접설정":
-            wc = s.get("weight_custom") or [1, 1]
-            total = wc[0] + wc[1]
-            weight_commute = round(remaining * wc[0] / total, 4)
-            weight_housing = round(remaining * wc[1] / total, 4)
+        if wp_pref == "직접설정":
+            wc = s.get("weight_custom") or [3, 4, 3]
+            if len(wc) >= 3:
+                ratio_c, ratio_h, ratio_i = wc[0], wc[1], wc[2]
+            else:
+                ratio_c, ratio_h, ratio_i = wc[0], wc[1], 0
         else:
-            weight_commute = round(remaining / 2, 4)
-            weight_housing = round(remaining - weight_commute, 4)
+            ratio_c, ratio_h, ratio_i = _WEIGHT_PRESETS.get(wp_pref, _WEIGHT_PRESETS["균형"])
+
+        # vibe 미선택 → 인프라 점수 의미 없음 → 인프라 비중 제거
+        if not vibe:
+            ratio_i = 0
+
+        total_ratio = ratio_c + ratio_h + ratio_i
+        if total_ratio <= 0:
+            # 안전망 — 모두 0이면 균형으로 폴백
+            ratio_c, ratio_h, ratio_i = 3, 4, (3 if vibe else 0)
+            total_ratio = ratio_c + ratio_h + ratio_i
+
+        weight_commute = round(ratio_c / total_ratio, 4)
+        weight_housing = round(ratio_h / total_ratio, 4)
+        weight_infra   = round(ratio_i / total_ratio, 4)
 
         required_infra = None
         if vibe:

@@ -63,23 +63,36 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="집찾봇 API", lifespan=lifespan)
 
 # ── CORS ───────────────────────────────────────────────────
-# CORS_ORIGINS 환경변수에 쉼표 구분 도메인 목록 설정.
-# 예: CORS_ORIGINS=https://housing-recommendation.pages.dev
-# ※ allow_credentials=True 는 반드시 구체적 origin 목록이 있을 때만 유효.
-#    미설정(개발용) 시 ["*"] + credentials=False 로 자동 전환.
+# 운영 / 로컬 개발 origin 을 코드에 직접 박아 두어,
+# Railway 환경변수가 누락되거나 오타가 있어도 인증 요청이 항상 통과하도록 보장.
+# CORS_ORIGINS 환경변수가 있으면 추가 origin 으로 합쳐서 허용.
+#   예: CORS_ORIGINS=https://my-other.pages.dev,https://www.mydomain.com
+# ※ allow_credentials=True 는 구체적 origin 목록일 때만 유효 → "*" 값은 무시.
+_PROD_ORIGINS = [
+    "https://housing-recommendation.pages.dev",
+]
+_LOCAL_ORIGINS = [
+    "http://localhost:8000",
+    "http://localhost:5500",
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:5500",
+]
 _cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
+_env_origins: list[str] = []
 if _cors_origins_env:
-    _cors_origins      = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
-    _allow_credentials = True
-else:
-    # 로컬 개발: 와일드카드 허용, credentials는 False (브라우저 스펙 준수)
-    _cors_origins      = ["*"]
-    _allow_credentials = False
+    for o in _cors_origins_env.split(","):
+        o = o.strip().rstrip("/")
+        # "*" 단독값은 credentials=True와 호환 안 되므로 무시
+        if o and o != "*":
+            _env_origins.append(o)
+
+# 중복 제거하면서 순서 유지
+_cors_origins = list(dict.fromkeys(_PROD_ORIGINS + _LOCAL_ORIGINS + _env_origins))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=_allow_credentials,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
