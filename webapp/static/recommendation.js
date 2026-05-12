@@ -639,6 +639,10 @@ async function toggleFav(btn) {
         infra_score:         r.infra_score,
         applicable_policies:       r.applicable_policies || [],
         applicable_policies_total: r.applicable_policies_total || 0,
+        // 찜 매물에 직장 좌표 영구 저장 — 찜목록 모달의 생활비 영수증 계산용
+        // (sessionStorage 휘발성 의존 제거)
+        workplace_lat:       _workplaceCoords && _workplaceCoords.lat,
+        workplace_lon:       _workplaceCoords && _workplaceCoords.lon,
       }),
     });
 

@@ -79,11 +79,25 @@
           commute_score:        snap.commute_score,
           cost_score:           snap.cost_score,
           infra_score:          snap.infra_score,
+          // 찜 시점에 저장한 직장 좌표 — 모달 생활비 영수증 계산용
+          workplace_lat:        snap.workplace_lat,
+          workplace_lon:        snap.workplace_lon,
         };
       });
 
       // 모달 외부 의존성 등록
       window.__modalResultsProvider = () => _items;
+
+      // 모달 열릴 때 매물별 workplace 좌표를 window._workplaceCoords 에 주입.
+      // (sessionStorage 캐시가 비어 있어도 작동하도록 각 찜 매물의 snapshot 우선 사용)
+      const _origOpenModal = window.openPropertyModal;
+      window.openPropertyModal = function(idx) {
+        const item = _items[idx];
+        if (item && item.workplace_lat != null && item.workplace_lon != null) {
+          window._workplaceCoords = { lat: item.workplace_lat, lon: item.workplace_lon };
+        }
+        if (typeof _origOpenModal === "function") _origOpenModal(idx);
+      };
 
       renderList();
       updateBadge();
