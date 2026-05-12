@@ -275,12 +275,9 @@ function resetChat() {
   const condSection = document.getElementById("current-conditions");
   if (condSection) condSection.style.display = "none";
 
-  const navRec   = document.getElementById("nav-rec");
+  // 주거추천·지도뷰는 항상 활성 상태 유지 — 배지만 초기화
   const navBadge = document.getElementById("nav-rec-badge");
-  if (navRec)   navRec.classList.add("disabled");
   if (navBadge) { navBadge.textContent = ""; navBadge.style.display = "none"; }
-  const navMap = document.getElementById("nav-map");
-  if (navMap) { navMap.classList.add("disabled"); navMap.href = "#"; }
 
   showInitialMessage();
   inputEl.focus();
@@ -310,19 +307,9 @@ function saveCondChips(slots) {
   localStorage.setItem("rec_cond_chips", JSON.stringify(chips));
 }
 
-// 사이드바 "주거 추천" 메뉴 활성화
+// 사이드바 추천 결과 배지 업데이트 (nav 자체는 항상 활성 상태)
 function enableRecNav() {
-  const navRec   = document.getElementById("nav-rec");
   const navBadge = document.getElementById("nav-rec-badge");
-  const navMap   = document.getElementById("nav-map");
-  if (navRec) {
-    navRec.classList.remove("disabled");
-    navRec.href = "/recommendation";
-  }
-  if (navMap) {
-    navMap.classList.remove("disabled");
-    navMap.href = "/recommendation?view=map";
-  }
   if (navBadge) {
     const count = parseInt(localStorage.getItem("rec_result_count") || "0", 10);
     if (count > 0) {
