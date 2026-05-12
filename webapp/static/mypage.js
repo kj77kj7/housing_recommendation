@@ -69,7 +69,6 @@
 
       document.getElementById("mp-policy-employment").textContent = p.employment_status || "–";
       document.getElementById("mp-policy-education").textContent  = p.education_level   || "–";
-      document.getElementById("mp-policy-marriage").textContent   = p.marriage_status   || "–";
       document.getElementById("mp-policy-own-house").textContent  =
         p.has_own_house === 1 ? "주택 소유" : (p.has_own_house === 0 ? "무주택" : "–");
       document.getElementById("mp-policy-income").textContent     = p.income_range      || "–";

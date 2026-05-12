@@ -183,6 +183,15 @@ async def chat(req: ChatRequest, request: Request):
     # 로그인 토큰에서 유저 정보 추출 (청년정책 1차 적용)
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     user_info = decode_token(token) if token else None
+    user_id: Optional[int] = None
+    if user_info:
+        _sub = user_info.get("sub")
+        if _sub:
+            try:
+                user_id = int(_sub)
+            except (ValueError, TypeError):
+                user_id = None
+
     if user_info and not bot.user_meta:
         bot.user_meta = {
             "age":        str(user_info.get("age", "")),
@@ -192,11 +201,38 @@ async def chat(req: ChatRequest, request: Request):
             "employment": user_info.get("employment", ""),  # 회원가입 시 취업상태
             "education":  user_info.get("education",  ""),  # 회원가입 시 학력
         }
+        # user_profile 에 저장된 값이 있으면 우선 적용
+        # → 이전에 입력했던 청년정책 슬롯 자동 재사용 (질문 스킵)
+        if user_id:
+            from webapp.user import load_policy_profile_for_chatbot
+            try:
+                stored = load_policy_profile_for_chatbot(user_id)
+                for k, v in stored.items():
+                    if v:
+                        bot.user_meta[k] = v
+            except Exception as e:
+                print(f"[user_profile load 실패] user_id={user_id}: {e}")
 
     reply, is_done, v5_params = bot.process(req.user_message)
 
     # 슬롯 현황
     slot_status = bot.slot_status()
+
+    # 청년정책 사용 시 정책 슬롯을 DB(user_profile)에 자동 저장
+    # use_youth_policy = "아니오" 인 사용자는 저장 안 함 (개인정보 최소화)
+    if user_id and bot.slots.get("use_youth_policy"):
+        policy_slots = {
+            "policy_employment": bot.slots.get("policy_employment"),
+            "policy_education":  bot.slots.get("policy_education"),
+            "policy_income":     bot.slots.get("policy_income"),
+            "policy_no_house":   bot.slots.get("policy_no_house"),
+        }
+        if any(v for v in policy_slots.values()):
+            from webapp.user import upsert_policy_profile_from_chatbot
+            try:
+                upsert_policy_profile_from_chatbot(user_id, policy_slots)
+            except Exception as e:
+                print(f"[user_profile 저장 실패] user_id={user_id}: {e}")
 
     # 빠른 옵션 버튼 결정
     missing = bot._missing_required()

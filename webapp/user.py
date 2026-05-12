@@ -94,6 +94,105 @@ def update_nickname(user_id: int, req: UpdateNicknameRequest):
     return {"message": "닉네임 변경 완료", "nickname": req.nickname}
 
 
+# ── 챗봇 → user_profile 동기화 헬퍼 ────────────────────────
+def upsert_policy_profile_from_chatbot(user_id: int, policy_slots: dict) -> None:
+    """챗봇 정책 슬롯을 user_profile 에 upsert + users.employment/education 동기화.
+
+    Args:
+        user_id: 사용자 ID
+        policy_slots: {policy_employment, policy_education, policy_income, policy_no_house}
+    """
+    if not user_id:
+        return
+
+    fields = {}
+    emp = policy_slots.get("policy_employment")
+    if emp:
+        fields["employment_status"] = emp
+    edu = policy_slots.get("policy_education")
+    if edu:
+        fields["education_level"] = edu
+    inc = policy_slots.get("policy_income")
+    if inc and inc != "모름":
+        fields["income_range"] = inc
+    no_house = policy_slots.get("policy_no_house")
+    if no_house == "y":
+        fields["has_own_house"] = 0
+    elif no_house == "n":
+        fields["has_own_house"] = 1
+    # 빈 문자열("모름") → 저장 안 함
+
+    if not fields:
+        return
+
+    conn = get_conn()
+    try:
+        # 1) users.employment / users.education 동기화
+        if "employment_status" in fields:
+            conn.execute("UPDATE users SET employment=? WHERE id=?",
+                         (fields["employment_status"], user_id))
+        if "education_level" in fields:
+            conn.execute("UPDATE users SET education=? WHERE id=?",
+                         (fields["education_level"], user_id))
+
+        # 2) user_profile upsert
+        existing = conn.execute(
+            "SELECT id FROM user_profile WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if existing:
+            set_clause = ", ".join(f"{k}=?" for k in fields.keys())
+            values    = list(fields.values()) + [existing["id"]]
+            conn.execute(f"UPDATE user_profile SET {set_clause} WHERE id=?", values)
+        else:
+            cols         = ["user_id"] + list(fields.keys())
+            vals         = [user_id] + list(fields.values())
+            placeholders = ",".join("?" * len(cols))
+            conn.execute(
+                f"INSERT INTO user_profile ({','.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[user_profile upsert 실패] user_id={user_id}: {e}")
+    finally:
+        conn.close()
+
+
+def load_policy_profile_for_chatbot(user_id: int) -> dict:
+    """user_profile + users 에서 챗봇 슬롯 키 형태로 변환해서 반환.
+
+    Returns:
+        {employment, education, policy_income, policy_no_house} (값 있는 항목만)
+    """
+    if not user_id:
+        return {}
+    conn = get_conn()
+    try:
+        u = conn.execute(
+            "SELECT employment, education FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        p = conn.execute(
+            "SELECT * FROM user_profile WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    result = {}
+    if u:
+        if u["employment"]: result["employment"] = u["employment"]
+        if u["education"]:  result["education"]  = u["education"]
+    if p:
+        # user_profile 값이 있으면 우선
+        if p["employment_status"]: result["employment"] = p["employment_status"]
+        if p["education_level"]:   result["education"]  = p["education_level"]
+        if p["income_range"]:      result["policy_income"]   = p["income_range"]
+        if p["has_own_house"] == 0: result["policy_no_house"] = "y"
+        elif p["has_own_house"] == 1: result["policy_no_house"] = "n"
+    return result
+
+
 # ── 정책 정보 (user_profile + users.employment/education) ─
 class UpdateProfileRequest(BaseModel):
     employment_status: Optional[str] = None   # "취업자" / "미취업자" / "자영업자"
