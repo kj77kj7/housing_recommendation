@@ -1,10 +1,10 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>집찾봇 — 주거 추천 결과</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/static/style.css" />
   <!-- 카카오맵 JavaScript SDK (지도뷰용 — autoload=false → kakao.maps.load 콜백으로 초기화) -->
   <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=287008c8a85abd65b7e5846af5d2bbab&autoload=false"></script>
 </head>
@@ -52,8 +52,16 @@
 
     <div class="sidebar-bottom">
       <div class="sidebar-label">계정</div>
-      <a class="nav-item disabled" href="#"><span class="nav-left"><span class="nav-icon">👤</span> 내 정보</span></a>
-      <a class="nav-item" href="#" onclick="handleLogout(event)"><span class="nav-left"><span class="nav-icon">🚪</span> 로그아웃</span></a>
+      <a class="nav-item" href="/mypage">
+        <span class="nav-left"><span class="nav-icon">👤</span> 내 정보</span>
+      </a>
+      <a class="nav-item" href="/favorites">
+        <span class="nav-left"><span class="nav-icon">❤️</span> 찜 목록</span>
+        <span class="nav-badge" id="sidebar-fav-badge" style="display:none"></span>
+      </a>
+      <a class="nav-item nav-item--danger" href="#" onclick="handleLogout(event)">
+        <span class="nav-left"><span class="nav-icon">🚪</span> 로그아웃</span>
+      </a>
       <div class="user-chip">
         <div class="user-avatar">🐻</div>
         <div>
@@ -237,16 +245,30 @@
         if (el) el.textContent = nick + '님';
       });
     }
+    // 찜 개수 배지 로드
+    const userId = parseInt(localStorage.getItem('user_id') || '0');
+    const token  = localStorage.getItem('token');
+    if (userId && token) {
+      fetch('/favorites/keys?user_id=' + userId, {
+        headers: { 'Authorization': 'Bearer ' + token }
+      }).then(r => r.ok ? r.json() : { keys: [] }).then(d => {
+        const n = (d.keys || []).length;
+        const badge = document.getElementById('sidebar-fav-badge');
+        if (badge && n > 0) { badge.textContent = n; badge.style.display = ''; }
+      }).catch(() => {});
+    }
   })();
 
   function handleLogout(e) {
     e.preventDefault();
     localStorage.removeItem('token');
     localStorage.removeItem('nickname');
+    localStorage.removeItem('user_id');
     location.href = '/login';
   }
 </script>
-<script src="/config.js"></script>
-<script src="/recommendation.js"></script>
+<script src="/static/config.js"></script>
+<script src="/static/property-modal.js"></script>
+<script src="/static/recommendation.js"></script>
 </body>
 </html>

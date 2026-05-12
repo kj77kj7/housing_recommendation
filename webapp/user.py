@@ -1,11 +1,14 @@
 """
 webapp/user.py
 ──────────────
-사용자 정보, 검색조건, 추천이력 라우터
+사용자 정보, 검색조건, 추천이력, 정책 정보 라우터
 
 엔드포인트:
-  GET    /user/{user_id}                  - 내 정보
-  PATCH  /user/{user_id}/nickname         - 닉네임 변경
+  GET    /user/{user_id}                  - 내 정보 전체 (회원가입 정보)
+  PATCH  /user/{user_id}                  - 계정 정보 편집 (닉네임/이메일/생년월일/성별)
+  PATCH  /user/{user_id}/nickname         - (호환용) 닉네임만 변경
+  GET    /user/{user_id}/profile          - 정책 정보 조회 (employment/education/income 등)
+  PATCH  /user/{user_id}/profile          - 정책 정보 편집/생성
   POST   /user/{user_id}/conditions       - 검색조건 저장
   GET    /user/{user_id}/conditions       - 저장된 검색조건 목록
   POST   /user/{user_id}/recommendations  - 추천 이력 저장
@@ -21,13 +24,16 @@ from webapp.database import get_conn
 router = APIRouter()
 
 
-# ── 내 정보 조회 ─────────────────────────────────────────
+# ── 내 정보 조회 (회원가입 정보 전체) ───────────────────
 @router.get("/{user_id}")
 def get_user(user_id: int):
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT id, nickname, email, created_at FROM users WHERE id=?", (user_id,)
+            """SELECT id, email, nickname, birth_date, gender,
+                      employment, education, kakao_id, created_at
+               FROM users WHERE id=?""",
+            (user_id,),
         ).fetchone()
     finally:
         conn.close()
@@ -36,7 +42,41 @@ def get_user(user_id: int):
     return dict(row)
 
 
-# ── 닉네임 수정 ──────────────────────────────────────────
+# ── 계정 정보 편집 (닉네임/이메일/생년월일/성별) ──────────
+class UpdateUserRequest(BaseModel):
+    nickname:   Optional[str] = None
+    email:      Optional[str] = None
+    birth_date: Optional[str] = None    # "YYYY-MM-DD"
+    gender:     Optional[str] = None    # "M" / "F"
+
+
+@router.patch("/{user_id}")
+def update_user(user_id: int, req: UpdateUserRequest):
+    """전달된 필드만 부분 업데이트."""
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="수정할 항목이 없습니다")
+
+    if "gender" in fields and fields["gender"] not in ("M", "F"):
+        raise HTTPException(status_code=400, detail="성별은 M 또는 F만 가능합니다")
+    if "email" in fields and "@" not in fields["email"]:
+        raise HTTPException(status_code=400, detail="올바른 이메일 형식이 아닙니다")
+
+    set_clause = ", ".join(f"{k}=?" for k in fields.keys())
+    values = list(fields.values()) + [user_id]
+
+    conn = get_conn()
+    try:
+        cur = conn.execute(f"UPDATE users SET {set_clause} WHERE id=?", values)
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "계정 정보 수정 완료", "updated": fields}
+
+
+# ── 닉네임 수정 (호환용) ─────────────────────────────────
 class UpdateNicknameRequest(BaseModel):
     nickname: str
 
@@ -52,6 +92,94 @@ def update_nickname(user_id: int, req: UpdateNicknameRequest):
     finally:
         conn.close()
     return {"message": "닉네임 변경 완료", "nickname": req.nickname}
+
+
+# ── 정책 정보 (user_profile + users.employment/education) ─
+class UpdateProfileRequest(BaseModel):
+    employment_status: Optional[str] = None   # "취업자" / "미취업자" / "자영업자"
+    education_level:   Optional[str] = None   # "고졸이하" / "대학재학" / "대졸" / "석박사"
+    marriage_status:   Optional[str] = None   # "기혼" / "미혼"
+    has_own_house:     Optional[int] = None   # 0=무주택, 1=주택소유
+    income_range:      Optional[str] = None   # "200만원 이하" 등
+    asset_range:       Optional[str] = None
+
+
+@router.get("/{user_id}/profile")
+def get_profile(user_id: int):
+    """정책 추천에 사용되는 추가 정보. users + user_profile 합쳐서 반환."""
+    conn = get_conn()
+    try:
+        u = conn.execute(
+            "SELECT employment, education FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        p = conn.execute(
+            "SELECT * FROM user_profile WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not u:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
+
+    result = {
+        "employment_status": (u["employment"] if u else None),
+        "education_level":   (u["education"]  if u else None),
+        "marriage_status":   None,
+        "has_own_house":     None,
+        "income_range":      None,
+        "asset_range":       None,
+    }
+    if p:
+        # user_profile 의 값이 있으면 우선 적용
+        if p["employment_status"]: result["employment_status"] = p["employment_status"]
+        if p["education_level"]:   result["education_level"]   = p["education_level"]
+        result["marriage_status"] = p["marriage_status"]
+        result["has_own_house"]   = p["has_own_house"]
+        result["income_range"]    = p["income_range"]
+        result["asset_range"]     = p["asset_range"]
+    return result
+
+
+@router.patch("/{user_id}/profile")
+def update_profile(user_id: int, req: UpdateProfileRequest):
+    """전달된 필드만 user_profile에 upsert. employment/education은 users에도 동기화."""
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="수정할 항목이 없습니다")
+
+    conn = get_conn()
+    try:
+        # 1) users.employment / users.education 동기화
+        if "employment_status" in fields:
+            conn.execute("UPDATE users SET employment=? WHERE id=?",
+                         (fields["employment_status"], user_id))
+        if "education_level" in fields:
+            conn.execute("UPDATE users SET education=? WHERE id=?",
+                         (fields["education_level"], user_id))
+
+        # 2) user_profile upsert (존재 여부 확인 후 INSERT or UPDATE)
+        existing = conn.execute(
+            "SELECT id FROM user_profile WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+
+        if existing:
+            set_clause = ", ".join(f"{k}=?" for k in fields.keys())
+            values = list(fields.values()) + [existing["id"]]
+            conn.execute(f"UPDATE user_profile SET {set_clause} WHERE id=?", values)
+        else:
+            cols = ["user_id"] + list(fields.keys())
+            vals = [user_id] + list(fields.values())
+            placeholders = ",".join("?" * len(cols))
+            conn.execute(
+                f"INSERT INTO user_profile ({','.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "정책 정보 저장 완료", "updated": fields}
 
 
 # ── 검색조건 저장 ────────────────────────────────────────

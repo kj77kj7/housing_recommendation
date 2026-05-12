@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>집찾봇 — 내 정보</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div id="app-page">
+
+  <!-- ══ 사이드바 ══════════════════════════════════════ -->
+  <nav id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">🏠</div>
+      <div class="brand-text">
+        <div class="brand-name">집찾봇</div>
+        <div class="brand-sub">청년 주거 추천</div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">메인</div>
+      <a class="nav-item" href="/">
+        <span class="nav-left"><span class="nav-icon">💬</span> 챗봇으로 찾기</span>
+      </a>
+      <a class="nav-item" href="/recommendation">
+        <span class="nav-left"><span class="nav-icon">🏠</span> 주거 추천</span>
+        <span class="nav-badge" id="sidebar-rec-badge" style="display:none"></span>
+      </a>
+      <a class="nav-item disabled" href="#">
+        <span class="nav-left"><span class="nav-icon">🗺️</span> 지도뷰</span>
+      </a>
+    </div>
+
+    <div class="sidebar-bottom">
+      <div class="sidebar-label">계정</div>
+      <a class="nav-item active" href="/mypage">
+        <span class="nav-left"><span class="nav-icon">👤</span> 내 정보</span>
+      </a>
+      <a class="nav-item" href="/favorites">
+        <span class="nav-left"><span class="nav-icon">❤️</span> 찜 목록</span>
+        <span class="nav-pct" id="sidebar-fav-badge" style="display:none"></span>
+      </a>
+      <a class="nav-item nav-item--danger" href="#" onclick="handleLogout(event)">
+        <span class="nav-left"><span class="nav-icon">🚪</span> 로그아웃</span>
+      </a>
+      <div class="user-chip">
+        <div class="user-avatar">🐻</div>
+        <div>
+          <div class="user-name" id="sidebar-username">사용자님</div>
+          <div class="user-sub" id="sidebar-usersub">청년 주거 탐색 중</div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ══ 메인 ══════════════════════════════════════ -->
+  <main id="page-main">
+    <header class="page-header">
+      <h1 class="page-title">내 정보</h1>
+      <button class="page-noti-btn" aria-label="알림">🔔</button>
+    </header>
+
+    <div class="page-body">
+
+      <!-- 프로필 헤더 -->
+      <section class="mypage-hero">
+        <div class="mypage-hero-avatar">🐻</div>
+        <div class="mypage-hero-info">
+          <div class="mypage-hero-name">
+            <span id="mp-nickname">사용자</span>님 <span class="mypage-hero-wave">👋</span>
+          </div>
+          <div class="mypage-hero-sub" id="mp-meta">정보 불러오는 중…</div>
+        </div>
+        <button class="mypage-hero-edit" data-target="profile">프로필 편집</button>
+      </section>
+
+      <!-- 계정 정보 -->
+      <section class="mypage-card" id="mp-account-card">
+        <div class="mypage-card-head">
+          <h3 class="mypage-card-title">계정 정보</h3>
+          <button class="mypage-card-edit" data-target="account">편집</button>
+        </div>
+        <div class="mypage-info-list">
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">닉네임</span>
+            <span class="mypage-info-value" id="mp-account-nickname">–</span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">이메일</span>
+            <span class="mypage-info-value mypage-info-link" id="mp-account-email">–</span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">생년월일</span>
+            <span class="mypage-info-value">
+              <span id="mp-account-birth">–</span>
+              <span class="mypage-age-pill" id="mp-account-age" style="display:none"></span>
+            </span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">가입일</span>
+            <span class="mypage-info-value" id="mp-account-created">–</span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">성별</span>
+            <span class="mypage-info-value" id="mp-account-gender">–</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 정책 정보 -->
+      <section class="mypage-card" id="mp-policy-card">
+        <div class="mypage-card-head">
+          <h3 class="mypage-card-title">정책 정보</h3>
+          <button class="mypage-card-edit" data-target="policy">편집</button>
+        </div>
+        <div class="mypage-info-list">
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">취업상태</span>
+            <span class="mypage-info-value" id="mp-policy-employment">–</span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">학력</span>
+            <span class="mypage-info-value" id="mp-policy-education">–</span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">혼인상태</span>
+            <span class="mypage-info-value" id="mp-policy-marriage">–</span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">주택소유</span>
+            <span class="mypage-info-value" id="mp-policy-own-house">–</span>
+          </div>
+          <div class="mypage-info-row">
+            <span class="mypage-info-label">월소득</span>
+            <span class="mypage-info-value" id="mp-policy-income">–</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 내 추천 매물 -->
+      <section class="mypage-card" id="mp-rec-card">
+        <div class="mypage-card-head">
+          <h3 class="mypage-card-title">내 추천 매물</h3>
+          <span class="mypage-card-meta" id="mp-rec-count">–</span>
+        </div>
+        <div class="mp-rec-list" id="mp-rec-list">
+          <div class="mp-rec-empty">아직 추천받은 매물이 없어요.</div>
+        </div>
+      </section>
+
+      <!-- 재추천 버튼 -->
+      <button id="mp-rerun-btn" class="mypage-rerun-btn">💬 조건 다시 설정하기</button>
+
+    </div>
+  </main>
+
+  <!-- ══ 매물 상세 모달 (recommendation.html 과 동일) ══════════ -->
+  <div id="property-modal-overlay" class="property-modal-overlay" style="display:none" aria-hidden="true">
+    <div class="property-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-header">
+        <span class="modal-title" id="modal-title">매물 상세</span>
+        <button class="modal-close-btn" id="modal-close-btn" aria-label="닫기">✕</button>
+      </div>
+      <div class="property-summary-card">
+        <div class="property-icon-box">🏢</div>
+        <div class="property-summary-info">
+          <div class="property-address" id="modal-address"></div>
+          <div class="property-meta" id="modal-meta"></div>
+          <div class="property-deposit" id="modal-deposit"></div>
+        </div>
+        <div class="property-summary-tags" id="modal-tags"></div>
+      </div>
+
+      <div class="modal-section-title">💸 예상 생활비</div>
+      <div class="modal-grid-2">
+        <div class="expense-receipt">
+          <div class="expense-receipt-header">
+            <div class="expense-receipt-title-row">
+              <div class="expense-receipt-title">서울살이 생활비 영수증</div>
+              <span class="expense-receipt-icon">🧾</span>
+            </div>
+            <div class="expense-receipt-subtitle" id="modal-expense-subtitle"></div>
+            <div class="expense-receipt-date" id="modal-expense-date"></div>
+          </div>
+          <div class="expense-receipt-body" id="modal-receipt-body">
+            <div class="expense-skeleton">
+              <div class="skeleton-line skeleton-line--lg"></div>
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line skeleton-line--lg"></div>
+            </div>
+          </div>
+        </div>
+        <div class="comparison-card">
+          <div class="comparison-card-title">📊 동네별 생활비 비교</div>
+          <div id="modal-comparison-body">
+            <div class="expense-skeleton">
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="policy-section">
+        <div class="policy-section-header">
+          <div class="policy-section-header-left">
+            <div class="policy-section-title">🏛️ 청년정책 맞춤 안내</div>
+            <div class="policy-section-subtitle" id="modal-policy-subtitle"></div>
+            <div class="policy-section-property-name" id="modal-policy-property-name"></div>
+          </div>
+          <div class="policy-savings-pill" id="modal-policy-savings"></div>
+        </div>
+        <div class="policy-list" id="modal-policy-list"></div>
+        <button class="policy-show-more" id="modal-policy-show-more" style="display:none" type="button">더 보기</button>
+        <div class="policy-empty" id="modal-policy-empty" style="display:none">
+          이 매물에 적용 가능한 청년정책이 없어요.
+        </div>
+      </div>
+
+      <div class="modal-footer-note">
+        ※ 정책 정보는 화이트리스트(20건) 기준이며, 정확한 자격·신청 방법은 각 정책 신청 URL에서 확인하세요.
+      </div>
+    </div>
+  </div>
+
+<script>
+  (function() {
+    if (!localStorage.getItem('token')) {
+      location.href = '/login';
+    }
+  })();
+  function handleLogout(e) {
+    e.preventDefault();
+    localStorage.removeItem('token');
+    localStorage.removeItem('nickname');
+    localStorage.removeItem('user_id');
+    location.href = '/login';
+  }
+</script>
+<script src="/static/config.js"></script>
+<script src="/static/property-modal.js"></script>
+<script src="/static/mypage.js"></script>
+</body>
+</html>

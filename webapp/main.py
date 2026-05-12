@@ -50,6 +50,7 @@ from webapp.auth import router as auth_router, decode_token
 from webapp.password import router as password_router
 from webapp.user import router as user_router
 from webapp.checklist import router as checklist_router
+from webapp.favorites import router as favorites_router
 
 
 # ── DB 초기화 (서버 시작 시 1회) ─────────────────────────
@@ -83,6 +84,7 @@ app.include_router(auth_router,      prefix="/auth",      tags=["인증"])
 app.include_router(password_router,  prefix="/password",  tags=["비밀번호"])
 app.include_router(user_router,      prefix="/user",      tags=["유저"])
 app.include_router(checklist_router, prefix="/checklist", tags=["체크리스트"])
+app.include_router(favorites_router, prefix="/favorites", tags=["찜목록"])
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -139,6 +141,16 @@ async def forgot_password_page():
 @app.get("/recommendation")
 async def recommendation_page():
     return FileResponse(str(STATIC_DIR / "recommendation.html"))
+
+
+@app.get("/mypage")
+async def mypage_page():
+    return FileResponse(str(STATIC_DIR / "mypage.html"))
+
+
+@app.get("/favorites")
+async def favorites_page():
+    return FileResponse(str(STATIC_DIR / "favorites.html"))
 
 
 @app.get("/api/health")

@@ -216,6 +216,32 @@ def init_db():
         ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
 
+    # ── favorites (찜한 매물) ──────────────────────────────
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS favorites (
+            id                  INT AUTO_INCREMENT PRIMARY KEY,
+            user_id             INT NOT NULL,
+            property_key        VARCHAR(64) NOT NULL,
+            address             VARCHAR(255),
+            gu                  VARCHAR(50),
+            dong                VARCHAR(50),
+            house_type          VARCHAR(50),
+            rent_type           VARCHAR(20),
+            area_m2             DECIMAL(6,2),
+            deposit_manwon      INT,
+            monthly_rent_manwon INT,
+            commute_min         INT,
+            score               INT,
+            lat                 DOUBLE,
+            lon                 DOUBLE,
+            snapshot_json       LONGTEXT,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_user_property (user_id, property_key),
+            INDEX idx_favorites_user (user_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    """)
+
     conn.commit()
     conn.close()
     params = _db_params()
