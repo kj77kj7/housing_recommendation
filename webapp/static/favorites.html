@@ -150,9 +150,15 @@
   })();
   function handleLogout(e) {
     e.preventDefault();
+    // 인증 데이터
     localStorage.removeItem('token');
     localStorage.removeItem('nickname');
     localStorage.removeItem('user_id');
+    localStorage.removeItem('rec_session_id');
+    // 챗봇 세션 + 추천결과 전체 초기화
+    sessionStorage.removeItem('chat_history');
+    sessionStorage.removeItem('rec_results_cache');
+    sessionStorage.removeItem('chat_session_id');
     location.href = '/login';
   }
 </script>
