@@ -794,7 +794,11 @@ class ChatBot:
 
     def _edit_slot(self, slot: str):
         """__EDIT:slot__ 명령 — 특정 슬롯을 초기화하고 해당 질문 재출력."""
-        valid = list(REQUIRED_SLOTS) + ["monthly_manwon"]
+        valid = (
+            list(REQUIRED_SLOTS)
+            + ["monthly_manwon", "vibe", "use_youth_policy"]
+            + POLICY_SLOTS
+        )
         if slot not in valid:
             return "수정할 항목을 찾을 수 없어요.", self._done, None
         self._done = False
@@ -807,11 +811,35 @@ class ChatBot:
                 self.slots.pop(linked, None)
                 if linked in self._slot_fill_order:
                     self._slot_fill_order.remove(linked)
+        # use_youth_policy 수정 시 정책 세부 슬롯도 모두 초기화하고 안내·intro 플래그 리셋
+        if slot == "use_youth_policy":
+            for linked in POLICY_SLOTS:
+                self.slots.pop(linked, None)
+            self._asked_policy = False
+            self._policy_intro_shown = False
+        # vibe 수정 시 _asked_vibe 플래그 리셋
+        if slot == "vibe":
+            self._asked_vibe = False
+            self.vibe_unrecognized = None
         self._last_asked_slot = slot
-        return (
-            f"수정할게요 ✏️\n\n{SLOT_QUESTIONS.get(slot, '다시 답해주세요.')}",
-            False, None,
-        )
+
+        # 슬롯별 질문 텍스트 결정
+        if slot in SLOT_QUESTIONS:
+            q = SLOT_QUESTIONS[slot]
+        elif slot == "vibe":
+            q = (
+                "동네 분위기 선호가 있으신가요?\n"
+                "① 조용함 ② 번화함 ③ 청년활기 ④ 가족친화 ⑤ 자연친화 "
+                "⑥ 편의 우선 ⑦ 운동·건강 ⑧ 카페·문화 ⑨ 상관없음"
+            )
+        elif slot == "use_youth_policy":
+            q = "현재 조건에 맞는 청년정책도 같이 확인하시겠어요? (예 / 아니요)"
+        elif slot in POLICY_QUESTIONS:
+            q = POLICY_QUESTIONS[slot]
+        else:
+            q = "다시 답해주세요."
+
+        return (f"수정할게요 ✏️\n\n{q}", False, None)
 
     # ── 메인 process() ─────────────────────────────────────
 
@@ -845,14 +873,17 @@ class ChatBot:
         new_slots = extract_slots_from_text(user_text, self.slots)
 
         # ── LLM 추측 차단 가드 ─────────────────────────────
-        # LLM이 주소·자유발화에서 house_type / weight_preference 를 추측해 채우는 것을 방지.
-        # 봇이 해당 슬롯을 직접 물어보지 않은 상태에서, 파서도 값을 못 잡으면 LLM 결과를 무시.
+        # 봇이 해당 슬롯을 직접 묻지 않았다면 LLM 추출 결과를 무조건 제거한다.
+        # (이전 구현은 parser 결과를 confirm으로 사용했지만, 원문자 ①②③ 가
+        #  house_type / weight_preference / vibe 에서 중복되어 다른 슬롯 답변을
+        #  잘못 confirm 하는 버그가 있었음 → "① 오피스텔" 클릭만 해도 weight_preference 가
+        #  '통근우선'으로 자동 채워지는 문제 발생.)
         if new_slots.get("house_type") is not None and self._last_asked_slot != "house_type":
-            if self._parse_house_choice(user_text) is None:
-                new_slots.pop("house_type", None)
+            new_slots.pop("house_type", None)
         if new_slots.get("weight_preference") is not None and self._last_asked_slot != "weight_preference":
-            if not self._parse_weight_choice(user_text):
-                new_slots.pop("weight_preference", None)
+            new_slots.pop("weight_preference", None)
+        if new_slots.get("vibe") is not None and self._last_asked_slot != "vibe":
+            new_slots.pop("vibe", None)
 
         # ── monthly_manwon LLM 결과 검증 및 보정 ────────────
         # LLM이 숫자를 잘못 해석할 수 있으므로(예: "200만원" → 20),
@@ -921,20 +952,21 @@ class ChatBot:
                     _addr_err = err
                     self._last_asked_slot = "work_address"
 
-        # 번호 선택 폴백 (LLM이 못 잡은 경우)
-        missing = self._missing_required()
-
-        if "house_type" in missing and new_slots.get("house_type") is None:
+        # 번호 선택 폴백 (LLM이 못 잡은 경우) —
+        # 봇이 그 슬롯을 직접 묻고 있는 동안에만 적용.
+        # (원문자 ①②③ 가 여러 슬롯에서 중복되므로 _last_asked_slot 으로 정확히 매칭해야
+        #  엉뚱한 슬롯이 자동으로 채워지는 문제를 막을 수 있음.)
+        if self._last_asked_slot == "house_type" and new_slots.get("house_type") is None:
             parsed = self._parse_house_choice(user_text)
             if parsed is not None:
                 new_slots["house_type"] = parsed if parsed else "__none__"
 
-        if "weight_preference" in missing and new_slots.get("weight_preference") is None:
+        if self._last_asked_slot == "weight_preference" and new_slots.get("weight_preference") is None:
             parsed = self._parse_weight_choice(user_text)
             if parsed:
                 new_slots["weight_preference"] = parsed
 
-        if self._asked_vibe and self.slots.get("vibe") is None and new_slots.get("vibe") is None:
+        if self._last_asked_slot == "vibe" and self.slots.get("vibe") is None and new_slots.get("vibe") is None:
             parsed = self._parse_vibe_choice(user_text)
             if parsed:
                 if "상관없음" in parsed:
@@ -946,7 +978,7 @@ class ChatBot:
                 if vibe_result["matched"]:
                     new_slots["vibe"] = vibe_result["matched"]
 
-        if self._asked_policy and self.slots.get("use_youth_policy") is None and new_slots.get("use_youth_policy") is None:
+        if self._last_asked_slot == "use_youth_policy" and self.slots.get("use_youth_policy") is None and new_slots.get("use_youth_policy") is None:
             pol = self._parse_policy_choice(user_text)
             if pol is not None:
                 new_slots["use_youth_policy"] = pol

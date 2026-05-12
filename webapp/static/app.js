@@ -4,6 +4,7 @@
 let sessionId      = null;
 let isWaiting      = false;
 let isRecommending = false;
+let latestSlotStatus = null;  // 최신 slot_status (수정 메뉴 조건부 표시용)
 
 // ── 슬롯 레이블 (친절한 표시용) ─────────────────────────
 const SLOT_DISPLAY_LABELS = {
@@ -15,6 +16,12 @@ const SLOT_DISPLAY_LABELS = {
   "allowed_minutes":   "통근 시간",
   "house_type":        "주택 유형",
   "weight_preference": "우선순위",
+  "vibe":              "동네 분위기",
+  "use_youth_policy":  "청년정책 반영",
+  "policy_employment": "취업상태",
+  "policy_education":  "학력",
+  "policy_income":     "월 소득",
+  "policy_no_house":   "무주택여부",
 };
 
 function friendlyCommandLabel(cmd) {
@@ -148,6 +155,7 @@ async function sendMessage(text) {
 
     appendBotMessage(data.bot_message);
     updatePanels(data.slot_status);
+    latestSlotStatus = data.slot_status || null;
     renderQuickOptions(data.quick_options);
 
     if (data.is_complete) {
@@ -239,15 +247,42 @@ async function startRecommendation(sid) {
 // ── 수정하기: 항목 선택 버튼 표시 ───────────────────────
 function showEditOptions() {
   appendBotMessage("어떤 항목을 수정하시겠어요? 🔧");
-  renderQuickOptions([
+
+  // latestSlotStatus 에서 슬롯별 정보 추출 (rent_type, use_youth_policy 등 조건 확인용)
+  const slots = {};
+  (latestSlotStatus || []).forEach(s => { slots[s.key] = s; });
+  const rentType = slots.rent_type && slots.rent_type.value;
+  const usePolicy = slots.use_youth_policy && (
+    slots.use_youth_policy.value === true ||
+    slots.use_youth_policy.value === "true" ||
+    slots.use_youth_policy.value === "예"
+  );
+
+  const opts = [
     { label: "직장 주소",   value: "__EDIT:work_address__" },
     { label: "이동수단",    value: "__EDIT:transport_mode__" },
     { label: "임대 유형",   value: "__EDIT:rent_type__" },
     { label: "예산",        value: "__EDIT:deposit_manwon__" },
+  ];
+  if (rentType === "월세") {
+    opts.push({ label: "월세 금액", value: "__EDIT:monthly_manwon__" });
+  }
+  opts.push(
     { label: "통근 시간",   value: "__EDIT:allowed_minutes__" },
     { label: "주택 유형",   value: "__EDIT:house_type__" },
     { label: "우선순위",    value: "__EDIT:weight_preference__" },
-  ]);
+    { label: "동네 분위기", value: "__EDIT:vibe__" },
+    { label: "청년정책 반영", value: "__EDIT:use_youth_policy__" },
+  );
+  if (usePolicy) {
+    opts.push(
+      { label: "취업상태",   value: "__EDIT:policy_employment__" },
+      { label: "학력",       value: "__EDIT:policy_education__" },
+      { label: "월 소득",    value: "__EDIT:policy_income__" },
+      { label: "무주택여부", value: "__EDIT:policy_no_house__" },
+    );
+  }
+  renderQuickOptions(opts);
 }
 
 // ── 새 추천 시작 (초기화) ────────────────────────────────
@@ -262,8 +297,9 @@ function resetChat() {
   localStorage.removeItem("rec_cond_chips");
 
   // 상태 초기화
-  sessionId      = null;
-  isRecommending = false;
+  sessionId         = null;
+  isRecommending    = false;
+  latestSlotStatus  = null;
 
   // UI 초기화
   messagesEl.innerHTML = "";
