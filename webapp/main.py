@@ -162,6 +162,18 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/myip")
+async def myip():
+    """Railway 서버 아웃바운드 IP 확인용 (ODsay 화이트리스트 등록 후 삭제 예정)"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get("https://api.ipify.org?format=json")
+            return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
     session_id = req.session_id or str(uuid.uuid4())
