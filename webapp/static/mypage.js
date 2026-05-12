@@ -33,7 +33,7 @@
   // ── 계정 정보 ───────────────────────────────────────
   async function loadAccount() {
     try {
-      const res = await fetch(`/user/${userId}`, {
+      const res = await fetch((window.API_BASE||"") + `/user/${userId}`, {
         headers: { "Authorization": "Bearer " + token },
       });
       if (!res.ok) return;
@@ -61,7 +61,7 @@
   // ── 정책 정보 ───────────────────────────────────────
   async function loadProfile() {
     try {
-      const res = await fetch(`/user/${userId}/profile`, {
+      const res = await fetch((window.API_BASE||"") + `/user/${userId}/profile`, {
         headers: { "Authorization": "Bearer " + token },
       });
       if (!res.ok) return;
@@ -147,7 +147,7 @@
     if (u.gender)     parts.push(u.gender === "M" ? "남성" : "여성");
 
     // 가장 최근 검색조건의 workplace
-    fetch(`/user/${userId}/conditions`, {
+    fetch((window.API_BASE||"") + `/user/${userId}/conditions`, {
       headers: { "Authorization": "Bearer " + token },
     })
       .then(r => r.ok ? r.json() : [])
@@ -180,7 +180,7 @@
     }
 
     // 찜 개수 배지
-    fetch(`/favorites/keys?user_id=${userId}`, {
+    fetch((window.API_BASE||"") + `/favorites/keys?user_id=${userId}`, {
       headers: { "Authorization": "Bearer " + token },
     })
       .then(r => r.ok ? r.json() : { keys: [] })
@@ -218,7 +218,7 @@
       const newNick = prompt("새 닉네임을 입력하세요", cur);
       if (newNick == null || newNick.trim() === "" || newNick === cur) return;
       try {
-        const res = await fetch(`/user/${userId}`, {
+        const res = await fetch((window.API_BASE||"") + `/user/${userId}`, {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
@@ -247,7 +247,7 @@
       if (!Object.keys(body).length) return;
 
       try {
-        const res = await fetch(`/user/${userId}/profile`, {
+        const res = await fetch((window.API_BASE||"") + `/user/${userId}/profile`, {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
