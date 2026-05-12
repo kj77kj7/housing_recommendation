@@ -44,6 +44,9 @@ TOKEN_EXPIRE_HOURS = 72
 KAKAO_CLIENT_ID     = os.getenv("KAKAO_CLIENT_ID")
 KAKAO_CLIENT_SECRET = os.getenv("KAKAO_CLIENT_SECRET")
 KAKAO_REDIRECT_URI  = os.getenv("KAKAO_REDIRECT_URI", "http://localhost:8000/auth/kakao/callback")
+# 카카오 콜백 후 토큰을 전달할 프론트엔드 주소
+# 운영: FRONTEND_URL=https://housing-recommendation.pages.dev
+FRONTEND_URL        = os.getenv("FRONTEND_URL", "http://localhost:8000")
 
 
 # ── 요청 스키마 ──────────────────────────────────────────
@@ -236,8 +239,9 @@ async def kakao_callback(code: str = None):
         "gender":     gender,
         "age":        _calc_age(birth),
     })
-    # 로그인 페이지로 리다이렉트하면서 토큰 전달 (login.html JS가 처리)
-    redirect_url = f"/login?token={token}&nickname={nickname}&user_id={user_id}"
+    # 프론트엔드 로그인 페이지로 리다이렉트하면서 토큰 전달 (login.html JS가 처리)
+    # FRONTEND_URL 이 없으면 상대경로 → Railway URL로 가버리므로 반드시 설정 필요
+    redirect_url = f"{FRONTEND_URL}/login?token={token}&nickname={nickname}&user_id={user_id}"
     return RedirectResponse(redirect_url)
 
 

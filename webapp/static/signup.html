@@ -121,7 +121,7 @@
   }
 
   function handleKakao() {
-    window.location.href = '/auth/kakao';
+    window.location.href = (window.API_BASE || '') + '/auth/kakao';
   }
 
   async function handleSignup() {

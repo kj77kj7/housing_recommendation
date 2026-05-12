@@ -62,20 +62,24 @@ async def lifespan(app: FastAPI):
 # ──────────────────────────────────────────────────────────
 app = FastAPI(title="집찾봇 API", lifespan=lifespan)
 
-# ── CORS (운영: Cloudflare Pages 도메인 / 로컬: 모두 허용) ─
-# CORS_ORIGINS 환경변수에 쉼표로 구분된 도메인 목록 입력.
-# 예: CORS_ORIGINS=https://myapp.pages.dev,https://www.myapp.com
-# 미설정 시 모든 출처 허용 (개발용).
+# ── CORS ───────────────────────────────────────────────────
+# CORS_ORIGINS 환경변수에 쉼표 구분 도메인 목록 설정.
+# 예: CORS_ORIGINS=https://housing-recommendation.pages.dev
+# ※ allow_credentials=True 는 반드시 구체적 origin 목록이 있을 때만 유효.
+#    미설정(개발용) 시 ["*"] + credentials=False 로 자동 전환.
 _cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
 if _cors_origins_env:
-    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    _cors_origins      = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    _allow_credentials = True
 else:
-    _cors_origins = ["*"]
+    # 로컬 개발: 와일드카드 허용, credentials는 False (브라우저 스펙 준수)
+    _cors_origins      = ["*"]
+    _allow_credentials = False
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
