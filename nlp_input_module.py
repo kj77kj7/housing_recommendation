@@ -200,6 +200,14 @@ class ChatBot:
         self.has_more_policy_cards: bool = False
         # ── 슬롯 입력 순서 추적 (이전으로/수정하기 기능용) ──
         self._slot_fill_order: List[str] = []
+        # ── 정책 슬롯 출처 추적 (조건부 DB 저장용) ──────────
+        # _db_loaded_slots: 세션 시작 시 DB에서 로드되어 채워진 슬롯들
+        #                   → DB 저장 트리거 안 함 (이미 DB에 있는 값)
+        # _session_only_slots: "수정하기"로 변경된 슬롯들
+        #                      → DB 저장 트리거 안 함 (세션 한정 변경)
+        # 두 set에 모두 없는 슬롯만이 "신규 자연흐름 입력" 으로 간주되어 DB 저장됨.
+        self._db_loaded_slots: set = set()
+        self._session_only_slots: set = set()
 
     # ── 필수 슬롯 확인 ──────────────────────────────────────
 
@@ -285,17 +293,30 @@ class ChatBot:
                 return "현재 조건에 맞는 청년정책도 같이 확인하시겠어요? (예 / 아니요)"
 
         # 청년정책 자격 정보 수집 (v6.0 — 카드 단계 제거)
-        # 회원정보(employment/education) 자동 채우고, 부족한 슬롯만 순차 질문.
+        # 회원정보(employment/education) + user_profile(income/no_house) 로 자동 채움.
+        # 자동 채운 슬롯은 _db_loaded_slots에 표시하여 DB 재저장 트리거 방지.
         if self.slots.get("use_youth_policy"):
-            # user_meta(회원정보) → 슬롯 자동 채우기 (1회성)
+            # user_meta → 슬롯 자동 채우기 (1회성)
             if self.slots.get("policy_employment") is None:
                 emp = (self.user_meta.get("employment", "") or "").strip()
                 if emp:
                     self.slots["policy_employment"] = emp
+                    self._db_loaded_slots.add("policy_employment")
             if self.slots.get("policy_education") is None:
                 edu = (self.user_meta.get("education", "") or "").strip()
                 if edu:
                     self.slots["policy_education"] = edu
+                    self._db_loaded_slots.add("policy_education")
+            if self.slots.get("policy_income") is None:
+                inc = (self.user_meta.get("policy_income", "") or "").strip()
+                if inc:
+                    self.slots["policy_income"] = inc
+                    self._db_loaded_slots.add("policy_income")
+            if self.slots.get("policy_no_house") is None:
+                nh = (self.user_meta.get("policy_no_house", "") or "").strip()
+                if nh:
+                    self.slots["policy_no_house"] = nh
+                    self._db_loaded_slots.add("policy_no_house")
 
             # 청년정책 안내 메시지 (최초 1회, 첫 미답 슬롯과 함께 출력)
             missing_policy = [s for s in POLICY_SLOTS if self.slots.get(s) is None]
@@ -814,6 +835,11 @@ class ChatBot:
         self.slots.pop(slot, None)
         if slot in self._slot_fill_order:
             self._slot_fill_order.remove(slot)
+        # 정책 슬롯을 "수정하기"로 변경 → 세션 한정 (DB 저장 X)
+        # _db_loaded_slots 에서 제거하고 _session_only_slots 로 옮김
+        if slot in POLICY_SLOTS:
+            self._db_loaded_slots.discard(slot)
+            self._session_only_slots.add(slot)
         # rent_type 수정 시 deposit_manwon / monthly_manwon도 연동 초기화
         if slot == "rent_type":
             for linked in ["deposit_manwon", "monthly_manwon"]:

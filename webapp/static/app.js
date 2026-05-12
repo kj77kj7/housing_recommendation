@@ -134,6 +134,15 @@ async function sendMessage(text) {
     showEditOptions();
     return;
   }
+  if (userText === "__CANCEL_EDIT__") {
+    appendUserMessage("취소 ↩");
+    appendBotMessage("수정 취소했어요. 추천을 시작하거나 다른 항목을 수정할 수 있어요.");
+    renderQuickOptions([
+      { label: "추천 시작 🏠", value: "__START_REC__" },
+      { label: "수정하기 ✏️",  value: "__EDIT__" },
+    ]);
+    return;
+  }
 
   // ── 나머지 명령 / 일반 텍스트 ────────────────────────────
   // __PREV__, __EDIT:*__ 은 raw command를 API에 전송하되
@@ -282,6 +291,8 @@ function showEditOptions() {
       { label: "무주택여부", value: "__EDIT:policy_no_house__" },
     );
   }
+  // 잘못 누른 경우 빠져나갈 수 있는 취소 버튼 (마지막 위치, 보조 스타일)
+  opts.push({ label: "취소 ↩", value: "__CANCEL_EDIT__" });
   renderQuickOptions(opts);
 }
 
@@ -436,8 +447,8 @@ function renderQuickOptions(options) {
   if (!options || !options.length) return;
   options.forEach((opt) => {
     const btn = document.createElement("button");
-    // "이전으로 ↩" 는 보조 스타일 적용
-    const isPrev = (opt.value === "__PREV__");
+    // "이전으로 ↩" / "취소 ↩" 은 보조 스타일 적용
+    const isPrev = (opt.value === "__PREV__" || opt.value === "__CANCEL_EDIT__");
     btn.className = "quick-btn" + (isPrev ? " quick-btn-prev" : "");
     btn.textContent = opt.label;
     btn.onclick = () => sendMessage(opt.value);

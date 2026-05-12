@@ -218,19 +218,31 @@ async def chat(req: ChatRequest, request: Request):
     # 슬롯 현황
     slot_status = bot.slot_status()
 
-    # 청년정책 사용 시 정책 슬롯을 DB(user_profile)에 자동 저장
-    # use_youth_policy = "아니오" 인 사용자는 저장 안 함 (개인정보 최소화)
+    # 청년정책 사용 시 — "신규 자연흐름 입력" 슬롯만 user_profile 에 저장.
+    #   - DB에서 로드된 슬롯(_db_loaded_slots) → 변경 없으면 저장 X (이미 같은 값)
+    #   - "수정하기"로 변경된 슬롯(_session_only_slots) → 세션 한정, 저장 X
+    #   - 위 두 집합에 모두 없는 슬롯만이 신규 입력 → 저장 후 _db_loaded_slots 로 이동
+    # use_youth_policy = "아니오" 인 사용자는 호출 자체 안 함 (개인정보 최소화).
     if user_id and bot.slots.get("use_youth_policy"):
-        policy_slots = {
-            "policy_employment": bot.slots.get("policy_employment"),
-            "policy_education":  bot.slots.get("policy_education"),
-            "policy_income":     bot.slots.get("policy_income"),
-            "policy_no_house":   bot.slots.get("policy_no_house"),
-        }
-        if any(v for v in policy_slots.values()):
+        from nlp_input_module import POLICY_SLOTS
+        new_slots_to_save = {}
+        for slot in POLICY_SLOTS:
+            val = bot.slots.get(slot)
+            if val is None:
+                continue
+            if slot in bot._db_loaded_slots:
+                continue
+            if slot in bot._session_only_slots:
+                continue
+            new_slots_to_save[slot] = val
+
+        if new_slots_to_save:
             from webapp.user import upsert_policy_profile_from_chatbot
             try:
-                upsert_policy_profile_from_chatbot(user_id, policy_slots)
+                upsert_policy_profile_from_chatbot(user_id, new_slots_to_save)
+                # 저장 완료 → 다음 turn 부터 _db_loaded 로 취급하여 중복 저장 방지
+                for slot in new_slots_to_save:
+                    bot._db_loaded_slots.add(slot)
             except Exception as e:
                 print(f"[user_profile 저장 실패] user_id={user_id}: {e}")
 

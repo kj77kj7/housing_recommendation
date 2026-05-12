@@ -36,7 +36,8 @@ let _currentView = "card";   // card | map
 let _workplaceCoords = null;  // /api/recommend 응답에서 채움 {lat, lon} or null
 let _allowedMinutes  = null;  // 통근 허용 분 (반경 원)
 let _transportMode   = null;  // "car" | "transit"
-const _expenseCache = {};     // {idx: ExpenseResponse} — 매물별 캐시
+// 주: _expenseCache 는 property-modal.js 에서 const 선언됨.
+//     양쪽 파일이 같이 로드되면 중복 선언으로 SyntaxError 발생하므로 여기서는 선언하지 않음.
 
 // ── 지도뷰 상태 ───────────────────────────────────────────
 let _kakaoMap        = null;
