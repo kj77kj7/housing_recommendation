@@ -148,7 +148,7 @@ async function renderModalExpense(r, idx) {
 
 async function fetchExpense(r) {
   const wp = _getWorkplaceCoords();
-  const res = await fetch("/api/expense", {
+  const res = await fetch((window.API_BASE || "") + "/api/expense", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

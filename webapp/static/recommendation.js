@@ -343,8 +343,7 @@ function renderPage() {
 
   // 2~N위 그리드
   const rest = results.slice(1);
-  gridEl.innerHTML = rest.map((r, i) => renderRestCard(r, i)).join("")
-                     + renderMoreCard(results.length);
+  gridEl.innerHTML = rest.map((r, i) => renderRestCard(r, i)).join("");
 
   // 서울 평균 비교
   if (_seoulAvg) renderAvgSection(_seoulAvg, results);
@@ -488,24 +487,6 @@ function renderRestCard(r, i) {
   `;
 }
 
-// ── 더보기 카드 ─────────────────────────────────────────
-function renderMoreCard(currentCount) {
-  if (currentCount >= 10) return "";
-  return `
-    <div class="rec-more-card" onclick="onMoreCardClick()">
-      <span style="font-size:40px">🏙️</span>
-      <div class="rec-more-title">추천 개수 늘리기</div>
-      <div class="rec-more-sub">더 많은 매물 보기</div>
-      <button class="rec-more-btn">추천 ${currentCount < 5 ? 5 : 10}개로 늘리기 ▼</button>
-    </div>
-  `;
-}
-function onMoreCardClick() {
-  // TODO: 실제 서버에 final_recommend_count 늘려서 재요청
-  alert("더 많은 매물 보기 기능은 준비 중이에요.\n현재 추천 결과는 상위 5개입니다.");
-}
-
-
 // ── 매물 상세 모달은 property-modal.js 로 분리됨 ──
 
 
@@ -585,7 +566,7 @@ async function toggleFav(btn) {
   btn.disabled = true;
 
   try {
-    const res = await fetch(`/favorites/toggle?user_id=${userId}`, {
+    const res = await fetch((window.API_BASE || "") + `/favorites/toggle?user_id=${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -635,7 +616,7 @@ async function loadFavKeys() {
   const userId = parseInt(localStorage.getItem('user_id') || '0');
   if (!userId) return;
   try {
-    const res = await fetch(`/favorites?user_id=${userId}`, {
+    const res = await fetch((window.API_BASE || "") + `/favorites?user_id=${userId}`, {
       headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('token') || '') },
     });
     const favs = await res.json();

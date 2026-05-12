@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>집찾봇 — 청년 주거 추천</title>
   <link rel="stylesheet" href="/style.css" />
+  <script src="/config.js"></script>
 </head>
 <body>
 <div id="app">
@@ -122,7 +123,7 @@
       const userId = parseInt(localStorage.getItem('user_id') || '0');
       const token  = localStorage.getItem('token');
       if (userId && token) {
-        fetch('/favorites/keys?user_id=' + userId, {
+        fetch((window.API_BASE || "") + '/favorites/keys?user_id=' + userId, {
           headers: { 'Authorization': 'Bearer ' + token }
         }).then(r => r.ok ? r.json() : { keys: [] }).then(d => {
           const n = (d.keys || []).length;
@@ -147,7 +148,6 @@
     location.href = '/login';
   }
 </script>
-<script src="/config.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

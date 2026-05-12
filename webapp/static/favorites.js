@@ -47,7 +47,7 @@
   async function loadFavorites() {
     const listEl = document.getElementById("fav-list");
     try {
-      const res = await fetch(`/favorites?user_id=${userId}`, {
+      const res = await fetch((window.API_BASE || "") + `/favorites?user_id=${userId}`, {
         headers: { "Authorization": "Bearer " + token },
       });
       if (!res.ok) throw new Error();
@@ -139,7 +139,7 @@
     btn.disabled = true;
 
     try {
-      const res = await fetch(`/favorites/toggle?user_id=${userId}`, {
+      const res = await fetch((window.API_BASE || "") + `/favorites/toggle?user_id=${userId}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
