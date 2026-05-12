@@ -72,10 +72,16 @@ COMMUTE_BUFFER_MIN  = 15    # 기본 여유분
 COMMUTE_BUFFER_FALLBACK_MIN = 30  # fallback 시 여유분
 
 # ── 3단계: 매물 단위 필터링 ──────────────────────────────
-MOLIT_RECENT_MONTHS   = 6
+# 두 상수는 추천 소요 시간에 직접 영향. 운영 중 미세조정 가능하도록 env var 로 분리.
+#   - MOLIT_RECENT_MONTHS: 국토부 API 에서 가져올 최근 N개월 데이터
+#     기본 3 (이전 6) — 호출 수 절반, 시세 정확도는 오히려 ↑
+#   - STAGE3_MAX_PROPERTY_PER_DONG: 동당 최대 매물 수 (geocoding·ODsay 호출 cap)
+#     기본 10 (이전 20) — 최종 5건 추천 품질에 영향 거의 없음
+# 롤백·튜닝: Railway 환경변수만 변경하면 즉시 적용 (재배포 자동 트리거).
+MOLIT_RECENT_MONTHS          = int(os.getenv("MOLIT_RECENT_MONTHS", "3"))
+STAGE3_MAX_PROPERTY_PER_DONG = int(os.getenv("STAGE3_MAX_PROPERTY_PER_DONG", "10"))
 MOLIT_ROW_URL = "http://apis.data.go.kr/1613000/RTMSDataSvcRHRent/getRTMSDataSvcRHRent"
 MOLIT_OFT_URL = "http://apis.data.go.kr/1613000/RTMSDataSvcOffiRent/getRTMSDataSvcOffiRent"
-STAGE3_MAX_PROPERTY_PER_DONG = 20  # 동당 최대 매물 수
 
 # ── 베이즈 평활화 (2단계에서 사용) ───────────────────────
 BAYESIAN_K = 10
