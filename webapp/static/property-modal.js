@@ -67,17 +67,24 @@ function openPropertyModal(idx) {
 
 function closePropertyModal() {
   const overlay = document.getElementById("property-modal-overlay");
+  // aria-hidden=true 적용 전 모달 내부 포커스를 밖으로 옮겨야 함
+  // (포커스가 hidden 영역 안에 있으면 브라우저가 접근성 경고 발생)
+  if (document.activeElement && overlay.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
   overlay.style.display = "none";
   overlay.setAttribute("aria-hidden", "true");
   document.body.classList.remove("modal-open");
 }
 
 function renderModalContent(r, idx) {
-  // 헤더 — "1위 추천 • 중구 신당동"
-  const rank = idx + 1;
+  // 헤더 — "1위 추천 · 중구 신당동" (찜목록 등 추천 순위가 의미없는 페이지는 순위 생략)
+  // 각 페이지에서 window.__modalShowRank = false 로 설정하여 옵션
+  const showRank = window.__modalShowRank !== false;
   const dongText = r.dong || r.address || "";
+  const prefix = showRank ? `${idx + 1}위 추천 · ` : "";
   document.getElementById("modal-title").textContent =
-    `${rank}위 추천 · ${(r.gu || "")} ${dongText}`.trim();
+    `${prefix}${(r.gu || "")} ${dongText}`.trim();
 
   // 매물 요약
   document.getElementById("modal-address").textContent = r.address || (r.gu + " " + r.dong);

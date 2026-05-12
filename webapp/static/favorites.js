@@ -18,6 +18,9 @@
 
   let _items = [];   // 매물 모달이 idx로 조회
 
+  // 찜목록의 모달에서는 "N위 추천" 머리표 숨김 (찜 정렬 순서일 뿐 추천 순위가 아니므로)
+  window.__modalShowRank = false;
+
   document.addEventListener("DOMContentLoaded", init);
 
   async function init() {

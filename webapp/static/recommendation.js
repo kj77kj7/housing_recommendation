@@ -140,6 +140,20 @@ async function loadResults(sessionId) {
       _allowedMinutes = data.allowed_minutes ?? null;
       _transportMode  = data.transport_mode  ?? null;
 
+      // sessionStorage 에 캐싱 — mypage·favorites 등 다른 페이지가 활용
+      // (이전엔 챗봇의 POST 완료 시점에 app.js 가 저장했으나, 사용자가 추천 중
+      //  /recommendation 으로 이동해 GET 폴링으로 결과를 받는 경로에선 캐시가 비어 있어
+      //  mypage 추천 매물 0건·favorites 생활비 영수증 미표시 문제 발생했음)
+      sessionStorage.setItem("rec_results_cache", JSON.stringify({
+        results:         data.results,
+        seoul_avg:       data.seoul_avg || null,
+        workplace_lat:   data.workplace_lat,
+        workplace_lon:   data.workplace_lon,
+        allowed_minutes: data.allowed_minutes,
+        transport_mode:  data.transport_mode,
+      }));
+      localStorage.setItem("rec_result_count", String(_allResults.length));
+
       if (!_allResults.length) {
         showError("조건에 맞는 추천 결과가 없어요. 조건을 조정해 보세요.");
         return;
@@ -265,13 +279,23 @@ function renderMapMarkers() {
   if (_workplaceCoords && _workplaceCoords.lat && _workplaceCoords.lon) {
     const wp = new kakao.maps.LatLng(_workplaceCoords.lat, _workplaceCoords.lon);
     bounds.extend(wp);
+    // 직장 마커 — 빨간 핀 (SVG data URI, 외부 CDN 의존 제거)
+    // 이전엔 https://t1.daumcdn.net/mapjsapi/images/2x/marker_red.png 사용했으나
+    // 카카오 CDN에서 해당 이미지가 사라져 404 발생 → SVG로 대체
+    const _workMarkerSvg = encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="42" viewBox="0 0 30 42">' +
+      '<path d="M15 0C6.7 0 0 6.7 0 15c0 11 15 27 15 27s15-16 15-27C30 6.7 23.3 0 15 0z" fill="#EF4444"/>' +
+      '<circle cx="15" cy="15" r="6" fill="#fff"/>' +
+      '</svg>'
+    );
     _kakaoWorkMarker = new kakao.maps.Marker({
       map: _kakaoMap,
       position: wp,
       title: "직장 위치",
       image: new kakao.maps.MarkerImage(
-        "https://t1.daumcdn.net/mapjsapi/images/2x/marker_red.png",
+        "data:image/svg+xml;charset=utf-8," + _workMarkerSvg,
         new kakao.maps.Size(30, 42),
+        { offset: new kakao.maps.Point(15, 42) },
       ),
     });
 
