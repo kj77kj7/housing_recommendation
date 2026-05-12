@@ -642,7 +642,6 @@ function syncHeartButtons() {
 }
 
 window.toggleFav = toggleFav;
-window.onMoreCardClick = onMoreCardClick;
 
 // ── 서울 평균 비교 ──────────────────────────────────────
 function renderAvgSection(seoulAvg, results) {

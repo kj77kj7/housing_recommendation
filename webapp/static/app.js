@@ -78,6 +78,8 @@ document.addEventListener("DOMContentLoaded", () => {
     sessionStorage.removeItem(CHAT_HISTORY_KEY);
     sessionStorage.removeItem(REC_CACHE_KEY);
     sessionStorage.removeItem(SESSION_ID_KEY);
+    // 새로고침 = 새 세션 → 이전 추천 결과 배지 클리어
+    localStorage.removeItem("rec_result_count");
     showInitialMessage();
   } else {
     sessionId = sessionStorage.getItem(SESSION_ID_KEY) || null;
@@ -85,9 +87,13 @@ document.addEventListener("DOMContentLoaded", () => {
     if (history.length) {
       restoreChatHistory(history);
     } else {
+      // 새 세션(채팅 히스토리 없음) → 이전 추천 결과 배지 클리어
+      localStorage.removeItem("rec_result_count");
       showInitialMessage();
     }
   }
+  // 페이지 진입 시 현재 배지 상태 동기화 (rec_result_count 가 0이면 배지 숨김)
+  enableRecNav();
   inputEl.focus();
 });
 
@@ -189,6 +195,11 @@ async function sendMessage(text) {
 async function startRecommendation(sid) {
   if (isRecommending) return;
   isRecommending = true;
+
+  // 새 추천 시작 → 이전 결과 카운트·캐시·배지 클리어
+  localStorage.removeItem("rec_result_count");
+  sessionStorage.removeItem(REC_CACHE_KEY);
+  enableRecNav();
 
   appendBotMessage("추천을 시작할게요 🔍\n잠시만 기다려 주세요...");
   setWaiting(true);

@@ -911,21 +911,24 @@ class ChatBot:
         new_slots = extract_slots_from_text(user_text, self.slots)
 
         # ── LLM 추측 차단 가드 ─────────────────────────────
-        # 봇이 해당 슬롯을 직접 묻지 않았다면 LLM 추출 결과를 무조건 제거한다.
-        # (이전 구현은 parser 결과를 confirm으로 사용했지만, 원문자 ①②③ 가
-        #  house_type / weight_preference / vibe 에서 중복되어 다른 슬롯 답변을
-        #  잘못 confirm 하는 버그가 있었음 → "① 오피스텔" 클릭만 해도 weight_preference 가
-        #  '통근우선'으로 자동 채워지는 문제 발생.)
+        # 봇이 해당 슬롯을 직접 묻지 않은 상태에서 LLM이 슬롯을 채운 경우,
+        # 사용자 발화에 명시적 키워드가 있을 때만 LLM 추출 유지.
+        # (원문자 ①②③ 는 house_type/weight_preference/vibe 에서 중복되므로 confirm 용으로 못 씀)
         if new_slots.get("house_type") is not None and self._last_asked_slot != "house_type":
-            new_slots.pop("house_type", None)
+            if not re.search(r"오피스텔|연립|다세대|빌라|단독|다가구", user_text):
+                new_slots.pop("house_type", None)
         if new_slots.get("weight_preference") is not None and self._last_asked_slot != "weight_preference":
-            new_slots.pop("weight_preference", None)
+            if not re.search(r"통근\s*우선|주거비\s*우선|균형|직접\s*설정|반반|저렴|위임|알아서|맡겨", user_text):
+                new_slots.pop("weight_preference", None)
         if new_slots.get("weight_custom") is not None and self._last_asked_slot != "weight_custom":
+            # weight_custom 은 비율 입력 단계에서만 유효
             new_slots.pop("weight_custom", None)
         if new_slots.get("vibe") is not None and self._last_asked_slot != "vibe":
-            new_slots.pop("vibe", None)
+            if not re.search(r"조용|번화|청년활기|가족친화|자연친화|편의|운동|건강|카페|문화", user_text):
+                new_slots.pop("vibe", None)
         if new_slots.get("use_youth_policy") is not None and self._last_asked_slot != "use_youth_policy":
-            new_slots.pop("use_youth_policy", None)
+            if not re.search(r"청년정책|정책\s*반영|정책\s*확인", user_text):
+                new_slots.pop("use_youth_policy", None)
 
         # ── monthly_manwon LLM 결과 검증 및 보정 ────────────
         # LLM이 숫자를 잘못 해석할 수 있으므로(예: "200만원" → 20),
