@@ -98,51 +98,76 @@ document.addEventListener("DOMContentLoaded", () => {
   loadResults(sessionId);
 });
 
-// ── 결과 로드 ────────────────────────────────────────────
+// ── 결과 로드 (조회 전용 — POST 호출 안 함) ──────────────
+// 추천 트리거는 챗봇의 "추천 시작" 버튼에서만 발생.
+// 이 페이지는 GET /api/recommend/result 로 캐시 상태만 조회하여 표시.
+//   - status="complete" : 결과 렌더
+//   - status="running"  : 로딩 표시 후 일정 간격 polling
+//   - status="not_started" : 챗봇으로 이동 안내
+//   - status="error" : 오류 메시지
 async function loadResults(sessionId) {
   showState("loading");
-  try {
-    const res  = await fetch((window.API_BASE || "") + "/api/recommend", {
-      method:  "POST",
-      headers: getAuthHeaders(),
-      body:    JSON.stringify({ session_id: sessionId }),
-    });
-    const data = await res.json();
 
-    if (res.status === 400) {
-      // 세션 만료 — 챗봇 페이지로 안내
-      showError("세션이 만료됐어요. 챗봇에서 조건을 다시 입력해 주세요.", true);
+  const POLL_INTERVAL_MS  = 5000;     // 5초 간격 polling
+  const MAX_POLL_DURATION = 15 * 60 * 1000;  // 최대 15분 polling (이후 타임아웃 처리)
+  const startedAt = Date.now();
+
+  async function fetchStatus() {
+    const res = await fetch(
+      (window.API_BASE || "") + "/api/recommend/result?session_id=" + encodeURIComponent(sessionId),
+      { headers: getAuthHeaders() }
+    );
+    return await res.json();
+  }
+
+  while (true) {
+    let data;
+    try {
+      data = await fetchStatus();
+    } catch (err) {
+      showError("서버에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.");
+      console.error(err);
       return;
     }
-    if (!res.ok || data.error) {
+
+    if (data.status === "complete") {
+      _allResults = data.results  || [];
+      _seoulAvg   = data.seoul_avg || null;
+      _workplaceCoords = (data.workplace_lat != null && data.workplace_lon != null)
+        ? { lat: data.workplace_lat, lon: data.workplace_lon }
+        : null;
+      window._workplaceCoords = _workplaceCoords;
+      _allowedMinutes = data.allowed_minutes ?? null;
+      _transportMode  = data.transport_mode  ?? null;
+
+      if (!_allResults.length) {
+        showError("조건에 맞는 추천 결과가 없어요. 조건을 조정해 보세요.");
+        return;
+      }
+      renderPage();
+      return;
+    }
+
+    if (data.status === "error") {
       const rawErr = data.error || "";
       let displayErr = "추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.";
       if (rawErr.includes("kakao") || rawErr.includes("ConnectionPool") || rawErr.includes("getaddrinfo"))
         displayErr = "주소 검색 서비스에 연결할 수 없어요.\n네트워크 연결을 확인하고 다시 시도해 주세요.";
-      else if (rawErr.includes("슬롯 미완성"))
-        displayErr = "조건 입력이 완료되지 않았어요. 챗봇에서 조건을 먼저 입력해 주세요.";
       showError(displayErr);
       return;
     }
 
-    _allResults = data.results  || [];
-    _seoulAvg   = data.seoul_avg || null;
-    _workplaceCoords = (data.workplace_lat != null && data.workplace_lon != null)
-      ? { lat: data.workplace_lat, lon: data.workplace_lon }
-      : null;
-    window._workplaceCoords = _workplaceCoords;  // property-modal.js 가 참조
-    _allowedMinutes = data.allowed_minutes ?? null;
-    _transportMode  = data.transport_mode  ?? null;
-
-    if (!_allResults.length) {
-      showError("조건에 맞는 추천 결과가 없어요. 조건을 조정해 보세요.");
+    if (data.status === "not_started") {
+      showState("no-session");
       return;
     }
 
-    renderPage();
-  } catch (err) {
-    showError("서버에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.");
-    console.error(err);
+    // status === "running" — 추천 처리 중. polling 계속.
+    if (Date.now() - startedAt > MAX_POLL_DURATION) {
+      showError("추천이 평소보다 오래 걸리고 있어요. 잠시 후 새로고침해 주세요.");
+      return;
+    }
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
   }
 }
 

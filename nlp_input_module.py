@@ -208,6 +208,16 @@ class ChatBot:
         # 두 set에 모두 없는 슬롯만이 "신규 자연흐름 입력" 으로 간주되어 DB 저장됨.
         self._db_loaded_slots: set = set()
         self._session_only_slots: set = set()
+        # ── 추천 결과 캐시 + 동시성 제어 ─────────────────────
+        # _recommendation_status: "idle" / "running" / "complete" / "error"
+        # _recommendation_result: { results, seoul_avg, workplace_lat, workplace_lon, ... }
+        # _recommendation_lock 은 main.py 의 /api/recommend 에서 asyncio.Lock 으로 생성·할당.
+        # 이렇게 ChatBot 인스턴스 단위로 락을 두면 동일 session_id 에서 두 번 호출돼도
+        # 한 번만 실제 작업이 실행되고 나머지 호출은 캐시 결과를 받게 됨.
+        self._recommendation_status: str = "idle"
+        self._recommendation_result: Optional[Dict[str, Any]] = None
+        self._recommendation_error: Optional[str] = None
+        self._recommendation_lock = None  # main.py 에서 asyncio.Lock 으로 lazy 초기화
 
     # ── 필수 슬롯 확인 ──────────────────────────────────────
 

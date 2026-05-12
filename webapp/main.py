@@ -19,6 +19,7 @@ import os
 import sys
 import io
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Optional
@@ -263,47 +264,34 @@ async def chat(req: ChatRequest, request: Request):
     }
 
 
-@app.post("/api/recommend")
-async def recommend(req: RecommendRequest):
+def _run_recommendation_sync(bot: ChatBot) -> dict:
+    """실제 추천 작업을 수행하는 sync 함수.
+    /api/recommend 가 락 안에서 호출함. 결과를 dict로 반환 (예외 시 raise)."""
     import time
     t0 = time.perf_counter()
-    print(f"[추천 API] 시작 session={req.session_id[:8]}...")
-
-    bot = _get_bot(req.session_id)
-    if not bot._done:
-        return JSONResponse(status_code=400, content={"error": "슬롯 미완성"})
 
     v5_params = bot.get_v5_params()
 
     import glob as glob_mod
-    # 원본 .csv 우선 (로컬에서 빠른 처리), 없으면 .csv.gz (배포 환경 — GitHub 100MB 한도 회피용).
-    # pandas 는 .gz 확장자 자동 감지.
     gz_files   = sorted(glob_mod.glob(str(ROOT / "사용_csv_모음" / "*주거비*.csv.gz")))
     csv_files  = sorted(glob_mod.glob(str(ROOT / "사용_csv_모음" / "*주거비*.csv")))
     raw_csv    = [f for f in csv_files if not f.endswith(".gz")]
     candidates = raw_csv + gz_files
     if not candidates:
-        return JSONResponse(status_code=500, content={"error": "주거지 CSV 없음"})
+        raise RuntimeError("주거지 CSV 없음")
 
     csv_path = candidates[0]
 
-    # stdout 캡처
     log_buf = io.StringIO()
     old_stdout = sys.stdout
     sys.stdout = log_buf
-
     try:
         from housing_recommendation_v5 import run_recommendation
         final_df, seoul_avg = run_recommendation(
             housing_csv_path=csv_path,
             **v5_params,
         )
-
         results = _df_to_list(final_df)
-
-        # expense API 호출 시 클라이언트가 함께 전달할 직장 좌표 (지오코딩 1회 추가)
-        # run_recommendation 내부에서 이미 동일 호출 발생하지만, 외부 노출 안 되어 별도 호출.
-        # 추천은 빈도 낮은 액션이므로 +1회 부담 미미. 실패 시 None → 프론트에서 expense 비활성화.
         try:
             from housing_recommendation_v5 import (
                 geocode_address_kakao_with_fallback, KAKAO_LOCAL_REST_API_KEY,
@@ -321,22 +309,94 @@ async def recommend(req: RecommendRequest):
             "results":         results,
             "seoul_avg":       seoul_avg,
             "log":             log_buf.getvalue()[-2000:],
-            "workplace_lat":   work_y,   # 위도
-            "workplace_lon":   work_x,   # 경도
-            # 지도뷰: 통근반경 원 그리기용
+            "workplace_lat":   work_y,
+            "workplace_lon":   work_x,
             "allowed_minutes": v5_params.get("allowed_minutes"),
             "transport_mode":  v5_params.get("transport_mode"),
         }
-    except Exception as e:
-        # stdout을 먼저 복원해야 traceback이 실제 콘솔로 출력됨
-        sys.stdout = old_stdout
-        elapsed = time.perf_counter() - t0
-        import traceback
-        print(f"[추천 API] 오류 {elapsed:.1f}s — {e}")
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
         sys.stdout = old_stdout
+
+
+@app.post("/api/recommend")
+async def recommend(req: RecommendRequest):
+    """추천 트리거 + 대기 + 결과 반환.
+
+    동일 session_id 에서 여러 번 호출돼도 실제 작업은 1회만 실행되도록 락·캐시 적용:
+      1) 이미 완료된 결과(_recommendation_result)가 있으면 즉시 반환
+      2) 다른 호출이 처리 중(_recommendation_status == "running")이면 락 대기
+         (대기 끝나면 캐시에 결과 있을 것 — 다시 1)로)
+      3) idle 이면 락 획득하고 sync 작업 실행 → 결과 캐시 → 반환
+    """
+    import time
+    t0 = time.perf_counter()
+    print(f"[추천 API] 진입 session={req.session_id[:8]}... status={None}")
+
+    bot = _get_bot(req.session_id)
+    if not bot._done:
+        return JSONResponse(status_code=400, content={"error": "슬롯 미완성"})
+
+    # 락 lazy 초기화 (이 함수 안 event loop 기준)
+    if bot._recommendation_lock is None:
+        bot._recommendation_lock = asyncio.Lock()
+
+    # 1) 이미 완료된 결과가 있으면 즉시 반환
+    if bot._recommendation_status == "complete" and bot._recommendation_result:
+        print(f"[추천 API] 캐시 hit session={req.session_id[:8]}")
+        return bot._recommendation_result
+
+    # 2) 락 획득 — 동시 호출은 대기 (먼저 들어온 호출이 작업 수행, 나머지는 대기)
+    async with bot._recommendation_lock:
+        # 락 안에서 다시 캐시 확인 (대기 중에 다른 호출이 완료했을 수 있음)
+        if bot._recommendation_status == "complete" and bot._recommendation_result:
+            print(f"[추천 API] 락 대기 중 캐시 채워짐 session={req.session_id[:8]}")
+            return bot._recommendation_result
+
+        # 3) 실제 작업 실행
+        bot._recommendation_status = "running"
+        bot._recommendation_error  = None
+        print(f"[추천 API] 작업 시작 session={req.session_id[:8]}")
+        try:
+            # 추천은 sync(blocking) — event loop 차단 막기 위해 thread executor 위에서 실행.
+            # 이렇게 해야 같은 worker 안 다른 요청(GET /api/recommend/result 등)도 동시 처리 가능.
+            result = await asyncio.to_thread(_run_recommendation_sync, bot)
+            bot._recommendation_result = result
+            bot._recommendation_status = "complete"
+            return result
+        except Exception as e:
+            sys.stdout = sys.__stdout__  # 안전망
+            elapsed = time.perf_counter() - t0
+            import traceback
+            print(f"[추천 API] 오류 {elapsed:.1f}s — {e}")
+            traceback.print_exc()
+            bot._recommendation_status = "error"
+            bot._recommendation_error  = str(e)
+            return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/recommend/result")
+async def recommend_result(session_id: str):
+    """추천 결과 조회 전용 엔드포인트 (트리거 안 함).
+
+    /recommendation 페이지와 챗봇 페이지 진입 시 이걸로 상태 확인:
+      - status="complete" : 결과 본문 포함 즉시 반환
+      - status="running"  : "처리 중" 응답 (클라이언트가 일정 간격 polling)
+      - status="idle"/"error" : 안내 메시지
+    """
+    if not session_id:
+        return JSONResponse(status_code=400, content={"status": "error", "error": "session_id 누락"})
+    bot = _sessions.get(session_id)
+    if bot is None:
+        # 세션이 메모리에 없음 = 추천 시작한 적 없음 (또는 서버 재시작)
+        return {"status": "not_started"}
+
+    if bot._recommendation_status == "complete" and bot._recommendation_result:
+        return {"status": "complete", **bot._recommendation_result}
+    if bot._recommendation_status == "running":
+        return {"status": "running"}
+    if bot._recommendation_status == "error":
+        return {"status": "error", "error": bot._recommendation_error or "추천 처리 중 오류"}
+    return {"status": "not_started"}
 
 
 @app.post("/api/expense")
