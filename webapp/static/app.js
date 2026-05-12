@@ -208,7 +208,11 @@ async function startRecommendation(sid) {
   sessionStorage.setItem("rec_in_progress", "1");
   sessionStorage.setItem("rec_in_progress_session", sid);
 
-  appendBotMessage("추천을 시작할게요 🔍\n잠시만 기다려 주세요...");
+  appendBotMessage(
+    "추천을 시작할게요 🔍\n" +
+    "공공데이터·외부 API 호출이 많아 약 4~7분 정도 걸려요.\n" +
+    "이 화면을 닫거나 다른 메뉴로 이동해도 추천은 계속 진행되니 잠시만 기다려 주세요."
+  );
   setWaiting(true);
 
   try {
@@ -287,7 +291,11 @@ async function resumeRecommendationIfNeeded() {
 
   isRecommending = true;
   setWaiting(true);
-  appendBotMessage("추천이 진행 중이에요 🔍\n결과를 가져오는 중...", true);
+  appendBotMessage(
+    "추천이 진행 중이에요 🔍\n" +
+    "전체 약 4~7분 정도 걸리며, 결과 도착 시 자동으로 안내됩니다.",
+    true
+  );
 
   const POLL_INTERVAL_MS = 5000;
   const MAX_DURATION_MS  = 15 * 60 * 1000;
