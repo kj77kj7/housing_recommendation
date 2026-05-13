@@ -209,30 +209,127 @@
     location.href = "/?rerun=1";
   }
 
-  // ── 편집 (간단 prompt 기반) ─────────────────────────
+  // ── 편집 (모달 기반) ────────────────────────────────
   async function onEdit(target) {
     if (!target || target === "profile" || target === "account") {
-      // 계정 정보 편집 — 닉네임만 우선 지원
-      const cur = localStorage.getItem("nickname") || "";
-      const newNick = prompt("새 닉네임을 입력하세요", cur);
-      if (newNick == null || newNick.trim() === "" || newNick === cur) return;
-      try {
-        const res = await fetch((window.API_BASE||"") + `/user/${userId}`, {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token,
-          },
-          body: JSON.stringify({ nickname: newNick.trim() }),
-        });
-        if (!res.ok) throw new Error("수정 실패");
-        localStorage.setItem("nickname", newNick.trim());
-        location.reload();
-      } catch (e) {
-        alert("닉네임 변경에 실패했어요.");
-      }
+      openAccountEditModal();
     } else if (target === "policy") {
       openPolicyEditModal();
+    }
+  }
+
+  // ── 계정 정보 편집 모달 ─────────────────────────────
+  function openAccountEditModal() {
+    const overlay = document.getElementById("account-edit-overlay");
+    if (!overlay) return;
+
+    // 현재 값으로 폼 채우기
+    const nick  = document.getElementById("mp-account-nickname").textContent.trim();
+    const email = document.getElementById("mp-account-email").textContent.trim();
+    const birth = document.getElementById("mp-account-birth").textContent.trim();
+    const gender = document.getElementById("mp-account-gender").textContent.trim();
+
+    document.getElementById("account-edit-nickname").value = (nick === "–") ? "" : nick;
+    document.getElementById("account-edit-email").value    = (email === "–") ? "" : email;
+    document.getElementById("account-edit-birth").value    = (/^\d{4}-\d{2}-\d{2}$/.test(birth)) ? birth : "";
+
+    overlay.querySelectorAll('.policy-edit-options[data-field="gender"] .policy-edit-opt')
+      .forEach(b => b.classList.remove("selected"));
+    if (gender === "남성") {
+      const m = overlay.querySelector('.policy-edit-options[data-field="gender"] [data-value="M"]');
+      if (m) m.classList.add("selected");
+    } else if (gender === "여성") {
+      const f = overlay.querySelector('.policy-edit-options[data-field="gender"] [data-value="F"]');
+      if (f) f.classList.add("selected");
+    }
+
+    // 단일 선택 + 닫기/취소/저장 이벤트 (1회 바인딩)
+    if (!overlay.dataset.bound) {
+      overlay.dataset.bound = "1";
+      overlay.querySelectorAll(".policy-edit-options").forEach(group => {
+        group.addEventListener("click", (e) => {
+          const btn = e.target.closest(".policy-edit-opt");
+          if (!btn) return;
+          group.querySelectorAll(".policy-edit-opt").forEach(o => o.classList.remove("selected"));
+          btn.classList.add("selected");
+        });
+      });
+      document.getElementById("account-edit-close").addEventListener("click", closeAccountEditModal);
+      document.getElementById("account-edit-cancel").addEventListener("click", closeAccountEditModal);
+      document.getElementById("account-edit-save").addEventListener("click", saveAccountEditModal);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAccountEditModal(); });
+    }
+
+    overlay.style.display = "flex";
+    overlay.setAttribute("aria-hidden", "false");
+  }
+
+  function closeAccountEditModal() {
+    const overlay = document.getElementById("account-edit-overlay");
+    if (document.activeElement && overlay.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
+    overlay.style.display = "none";
+    overlay.setAttribute("aria-hidden", "true");
+  }
+
+  async function saveAccountEditModal() {
+    const overlay = document.getElementById("account-edit-overlay");
+    const body = {};
+
+    // 현재 값과 비교해서 실제 변경된 항목만 PATCH (사용자가 안 바꾼 필드는 보내지 않음)
+    const curNick   = document.getElementById("mp-account-nickname").textContent.trim();
+    const curEmail  = document.getElementById("mp-account-email").textContent.trim();
+    const curBirth  = document.getElementById("mp-account-birth").textContent.trim();
+    const curGender = document.getElementById("mp-account-gender").textContent.trim();
+
+    const newNick  = document.getElementById("account-edit-nickname").value.trim();
+    const newEmail = document.getElementById("account-edit-email").value.trim();
+    const newBirth = document.getElementById("account-edit-birth").value.trim();
+    const genderSel = overlay.querySelector('.policy-edit-options[data-field="gender"] .policy-edit-opt.selected');
+    const newGender = genderSel ? genderSel.dataset.value : "";
+
+    if (newNick  && newNick  !== curNick)                      body.nickname   = newNick;
+    if (newEmail && newEmail !== curEmail)                     body.email      = newEmail;
+    if (newBirth && newBirth !== curBirth)                     body.birth_date = newBirth;
+    // 성별: 변경 안 된 경우(현재와 동일 표시) 또는 미선택 시 보내지 않음
+    const curGenderCode = curGender === "남성" ? "M" : (curGender === "여성" ? "F" : "");
+    if (newGender && newGender !== curGenderCode)              body.gender     = newGender;
+
+    if (!Object.keys(body).length) {
+      alert("변경된 항목이 없어요.");
+      return;
+    }
+
+    // 클라이언트 측 기본 검증
+    if (body.email && !body.email.includes("@")) {
+      alert("올바른 이메일 형식이 아닙니다.");
+      return;
+    }
+
+    const saveBtn = document.getElementById("account-edit-save");
+    saveBtn.disabled = true;
+    try {
+      const res = await fetch((window.API_BASE||"") + `/user/${userId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + token,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "수정 실패");
+      }
+      // 닉네임 변경 시 localStorage 도 갱신
+      if (body.nickname) localStorage.setItem("nickname", body.nickname);
+      closeAccountEditModal();
+      location.reload();
+    } catch (e) {
+      alert("계정 정보 저장에 실패했어요: " + (e.message || ""));
+    } finally {
+      saveBtn.disabled = false;
     }
   }
 

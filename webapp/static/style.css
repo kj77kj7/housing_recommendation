@@ -2169,3 +2169,20 @@ body.modal-open {
 }
 .policy-edit-btn--save:hover { background: #16A34A; }
 .policy-edit-btn--save:disabled { background: #D1D5DB; cursor: not-allowed; }
+
+/* 계정 정보 모달 텍스트 input 공통 — 정책 모달 옆에 함께 동작 */
+.account-edit-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1.5px solid #E5E7EB;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #111827;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.account-edit-input:focus { border-color: var(--green); }
+.account-edit-input::placeholder { color: #9CA3AF; }

@@ -284,6 +284,45 @@
     </div>
   </div>
 
+  <!-- ══ 계정 정보 편집 모달 ════════════════════════════════════ -->
+  <div id="account-edit-overlay" class="policy-edit-overlay" style="display:none" aria-hidden="true">
+    <div class="policy-edit-modal" role="dialog" aria-modal="true" aria-labelledby="account-edit-title">
+      <div class="policy-edit-header">
+        <h3 class="policy-edit-title" id="account-edit-title">계정 정보 편집</h3>
+        <button class="policy-edit-close" id="account-edit-close" aria-label="닫기">✕</button>
+      </div>
+      <p class="policy-edit-note">바꾸고 싶은 항목만 수정하세요. 비밀번호는 '비밀번호 찾기' 페이지에서 변경할 수 있습니다.</p>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label" for="account-edit-nickname">닉네임</label>
+        <input type="text" id="account-edit-nickname" class="account-edit-input" placeholder="새 닉네임" />
+      </div>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label" for="account-edit-email">이메일</label>
+        <input type="email" id="account-edit-email" class="account-edit-input" placeholder="email@example.com" />
+      </div>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label" for="account-edit-birth">생년월일</label>
+        <input type="date" id="account-edit-birth" class="account-edit-input" />
+      </div>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label">성별</label>
+        <div class="policy-edit-options" data-field="gender">
+          <button type="button" class="policy-edit-opt" data-value="M">남성</button>
+          <button type="button" class="policy-edit-opt" data-value="F">여성</button>
+        </div>
+      </div>
+
+      <div class="policy-edit-footer">
+        <button type="button" class="policy-edit-btn policy-edit-btn--cancel" id="account-edit-cancel">취소</button>
+        <button type="button" class="policy-edit-btn policy-edit-btn--save" id="account-edit-save">저장</button>
+      </div>
+    </div>
+  </div>
+
 <script>
   (function() {
     if (!localStorage.getItem('token')) {
