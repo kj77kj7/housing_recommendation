@@ -374,10 +374,15 @@ function priceForSort(r) {
 function renderPage() {
   const results = sortedResults();
 
-  // 사이드바 매물 수 배지
+  // 사이드바 매물 수 배지 — 0건이면 숨김 (의미 없는 빈 pill 방지)
   if (navBadgeEl) {
-    navBadgeEl.textContent = results.length;
-    navBadgeEl.style.display = "";
+    if (results.length > 0) {
+      navBadgeEl.textContent = results.length;
+      navBadgeEl.style.display = "";
+    } else {
+      navBadgeEl.textContent = "";
+      navBadgeEl.style.display = "none";
+    }
   }
   localStorage.setItem("rec_result_count", String(results.length));
 

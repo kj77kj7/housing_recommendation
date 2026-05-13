@@ -218,6 +218,16 @@ class ChatBot:
         self._recommendation_result: Optional[Dict[str, Any]] = None
         self._recommendation_error: Optional[str] = None
         self._recommendation_lock = None  # main.py 에서 asyncio.Lock 으로 lazy 초기화
+        # ── 수정 중 취소(active edit cancel) 백업 ────────────
+        # _edit_slot 호출 시 원본 값을 저장 → __CANCEL_EDIT_ACTIVE__ 로 복원
+        # _edit_backup_slot: 수정 중인 슬롯 이름 (없으면 None)
+        # _edit_backup_value: 슬롯의 원본 값
+        # _edit_backup_extra: 연동 슬롯(예: rent_type 변경 시 deposit/monthly) 원본 dict
+        # _edit_backup_done: 수정 전 _done 상태 (True 면 요약 화면이었음)
+        self._edit_backup_slot: Optional[str] = None
+        self._edit_backup_value: Any = None
+        self._edit_backup_extra: Dict[str, Any] = {}
+        self._edit_backup_done: bool = False
 
     # ── 필수 슬롯 확인 ──────────────────────────────────────
 
@@ -841,6 +851,27 @@ class ChatBot:
         )
         if slot not in valid:
             return "수정할 항목을 찾을 수 없어요.", self._done, None
+
+        # ── 수정 중 취소 대비 백업 ──────────────────────────
+        # 사용자가 잘못 누른 경우 __CANCEL_EDIT_ACTIVE__ 로 원본 복원 가능하게.
+        self._edit_backup_slot  = slot
+        self._edit_backup_value = self.slots.get(slot)
+        self._edit_backup_done  = self._done
+        self._edit_backup_extra = {}
+        if slot == "rent_type":
+            for linked in ["deposit_manwon", "monthly_manwon"]:
+                self._edit_backup_extra[linked] = self.slots.get(linked)
+        if slot == "weight_preference":
+            self._edit_backup_extra["weight_custom"] = self.slots.get("weight_custom")
+        if slot == "use_youth_policy":
+            for linked in POLICY_SLOTS:
+                self._edit_backup_extra[linked] = self.slots.get(linked)
+            self._edit_backup_extra["_asked_policy"] = self._asked_policy
+            self._edit_backup_extra["_policy_intro_shown"] = self._policy_intro_shown
+        if slot == "vibe":
+            self._edit_backup_extra["_asked_vibe"] = self._asked_vibe
+            self._edit_backup_extra["vibe_unrecognized"] = self.vibe_unrecognized
+
         self._done = False
         self.slots.pop(slot, None)
         if slot in self._slot_fill_order:
@@ -889,6 +920,68 @@ class ChatBot:
 
         return (f"수정할게요 ✏️\n\n{q}", False, None)
 
+    def _cancel_active_edit(self):
+        """__CANCEL_EDIT_ACTIVE__ 명령 — 진행 중인 슬롯 수정을 취소하고 원본 복원.
+
+        _edit_slot 에서 백업한 값을 되돌리고 요약 화면으로 복귀.
+        백업이 없으면 (수정 진행 중이 아니면) 안내 메시지만.
+        """
+        if not self._edit_backup_slot:
+            return "취소할 수정 작업이 없어요.", self._done, None
+
+        slot = self._edit_backup_slot
+        # 슬롯 본 값 복원
+        if self._edit_backup_value is not None:
+            self.slots[slot] = self._edit_backup_value
+        else:
+            self.slots.pop(slot, None)
+        # 연동 슬롯 복원
+        for k, v in self._edit_backup_extra.items():
+            if k == "_asked_policy":
+                self._asked_policy = v
+            elif k == "_policy_intro_shown":
+                self._policy_intro_shown = v
+            elif k == "_asked_vibe":
+                self._asked_vibe = v
+            elif k == "vibe_unrecognized":
+                self.vibe_unrecognized = v
+            else:
+                # 일반 슬롯
+                if v is not None:
+                    self.slots[k] = v
+                else:
+                    self.slots.pop(k, None)
+        # _slot_fill_order 에 슬롯이 빠져 있으면 복원
+        if self._edit_backup_value is not None and slot not in self._slot_fill_order \
+                and (slot in REQUIRED_SLOTS or slot == "monthly_manwon"):
+            self._slot_fill_order.append(slot)
+        # 정책 슬롯 수정 취소면 _session_only 표시도 제거 (원본은 원래 DB-loaded 상태일 수 있음)
+        if slot in POLICY_SLOTS:
+            self._session_only_slots.discard(slot)
+            # 원본 값이 있으면 DB-loaded 로 간주
+            if self._edit_backup_value is not None:
+                self._db_loaded_slots.add(slot)
+
+        # 상태 복원
+        was_done = self._edit_backup_done
+        self._done = was_done
+        self._last_asked_slot = None
+
+        # 백업 클리어
+        self._edit_backup_slot  = None
+        self._edit_backup_value = None
+        self._edit_backup_extra = {}
+        self._edit_backup_done  = False
+
+        # was_done 이면 요약 화면 + v5 params 다시 반환 (수정 전 상태로 복귀)
+        if was_done:
+            return self._build_summary(), True, self.get_v5_params()
+        # was_done 이 아니면 (드문 케이스) 다음 질문으로
+        next_q = self._next_question()
+        if next_q is not None:
+            return next_q, False, None
+        return "취소했어요.", False, None
+
     # ── 메인 process() ─────────────────────────────────────
 
     def process(self, user_text: str):
@@ -896,6 +989,8 @@ class ChatBot:
         _t = user_text.strip()
         if _t == "__PREV__":
             return self._undo_last_slot()
+        if _t == "__CANCEL_EDIT_ACTIVE__":
+            return self._cancel_active_edit()
         if _t.startswith("__EDIT:") and _t.endswith("__"):
             return self._edit_slot(_t[7:-2])
 
@@ -1076,6 +1171,11 @@ class ChatBot:
             return SLOT_QUESTIONS[miss[0]], False, None
 
         self._done = True
+        # 수정 작업이 정상 완료됐으면 백업 클리어 (취소 시점 지남)
+        self._edit_backup_slot  = None
+        self._edit_backup_value = None
+        self._edit_backup_extra = {}
+        self._edit_backup_done  = False
         params = self.get_v5_params()
         return self._build_summary(), True, params
 

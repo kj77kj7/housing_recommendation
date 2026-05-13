@@ -26,6 +26,7 @@ const SLOT_DISPLAY_LABELS = {
 
 function friendlyCommandLabel(cmd) {
   if (cmd === "__PREV__") return "이전으로 ↩";
+  if (cmd === "__CANCEL_EDIT_ACTIVE__") return "수정 취소 ↩";
   if (cmd.startsWith("__EDIT:") && cmd.endsWith("__")) {
     const slot = cmd.slice(7, -2);
     return `✏️ ${SLOT_DISPLAY_LABELS[slot] || slot} 수정`;
@@ -555,8 +556,12 @@ function renderQuickOptions(options) {
   if (!options || !options.length) return;
   options.forEach((opt) => {
     const btn = document.createElement("button");
-    // "이전으로 ↩" / "취소 ↩" 은 보조 스타일 적용
-    const isPrev = (opt.value === "__PREV__" || opt.value === "__CANCEL_EDIT__");
+    // "이전으로 ↩" / "취소 ↩" / "수정 취소 ↩" 은 보조 스타일 적용
+    const isPrev = (
+      opt.value === "__PREV__"
+      || opt.value === "__CANCEL_EDIT__"
+      || opt.value === "__CANCEL_EDIT_ACTIVE__"
+    );
     btn.className = "quick-btn" + (isPrev ? " quick-btn-prev" : "");
     btn.textContent = opt.label;
     btn.onclick = () => sendMessage(opt.value);

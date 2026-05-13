@@ -654,4 +654,9 @@ def _quick_options_for(slot: Optional[str], bot: ChatBot) -> list:
     if bot._slot_fill_order:
         options.append({"label": "이전으로 ↩", "value": "__PREV__"})
 
+    # 수정 진행 중(_edit_backup_slot 존재)이면 "수정 취소 ↩" 추가
+    # → 사용자가 잘못 누른 슬롯 수정을 원본 복원으로 빠져나갈 수 있게 함
+    if getattr(bot, "_edit_backup_slot", None):
+        options.append({"label": "수정 취소 ↩", "value": "__CANCEL_EDIT_ACTIVE__"})
+
     return options
