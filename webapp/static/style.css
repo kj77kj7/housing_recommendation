@@ -294,6 +294,25 @@ html, body { height: 100%; font-family: var(--font); background: var(--bg-card);
 }
 .quick-btn.quick-btn-prev:hover { background: var(--bg); color: var(--fg); }
 
+/* 다중선택 모드 — 동네 분위기 등에서 여러 개 체크 가능 */
+.quick-btn.quick-btn-multi:hover { background: white; color: var(--green); }
+.quick-btn.quick-btn--checked,
+.quick-btn.quick-btn--checked:hover {
+  background: var(--green);
+  color: white;
+  border-color: var(--green);
+}
+.quick-btn.quick-btn--checked::before { content: "✓ "; }
+
+/* 선택 완료 버튼 — 다중선택 옆에 표시되는 제출 버튼 (강조) */
+.quick-btn.quick-btn-submit {
+  background: var(--green);
+  color: white;
+  border-color: var(--green);
+  font-weight: 700;
+}
+.quick-btn.quick-btn-submit:hover { background: #16A34A; border-color: #16A34A; }
+
 /* ── 입력창 ─────────────────────────────────────────── */
 #input-area {
   height: 73px;

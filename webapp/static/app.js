@@ -175,7 +175,7 @@ async function sendMessage(text) {
     appendBotMessage(data.bot_message);
     updatePanels(data.slot_status);
     latestSlotStatus = data.slot_status || null;
-    renderQuickOptions(data.quick_options);
+    renderQuickOptions(data.quick_options, data.quick_options_multi);
 
     if (data.is_complete) {
       localStorage.setItem("rec_session_id", sessionId);
@@ -555,12 +555,57 @@ function restoreChatHistory(history) {
 }
 
 // ── 빠른 옵션 ────────────────────────────────────────────
-function renderQuickOptions(options) {
+// multiSelect 가 true 면 옵션 중 일반(__로 시작 안 함) 항목들이 체크박스 모드로 표시되고,
+// 마지막에 "선택 완료" 버튼이 추가됨. 명령 옵션(__PREV__, __CANCEL_*__) 은 단일 클릭 유지.
+function renderQuickOptions(options, multiSelect) {
   clearQuickOptions();
   if (!options || !options.length) return;
-  options.forEach((opt) => {
+
+  const cmdOpts   = [];
+  const multiOpts = [];
+  options.forEach(opt => {
+    if (multiSelect && typeof opt.value === "string" && !opt.value.startsWith("__")) {
+      multiOpts.push(opt);
+    } else {
+      cmdOpts.push(opt);
+    }
+  });
+
+  // 다중선택 버튼 (체크박스 스타일)
+  multiOpts.forEach(opt => {
     const btn = document.createElement("button");
-    // "이전으로 ↩" / "취소 ↩" / "수정 취소 ↩" 은 보조 스타일 적용
+    btn.className = "quick-btn quick-btn-multi";
+    btn.textContent = opt.label;
+    btn.dataset.value = opt.value;
+    btn.dataset.selected = "0";
+    btn.onclick = () => {
+      const isOn = btn.dataset.selected === "1";
+      btn.dataset.selected = isOn ? "0" : "1";
+      btn.classList.toggle("quick-btn--checked", !isOn);
+    };
+    quickOptEl.appendChild(btn);
+  });
+
+  // "선택 완료 →" 버튼 (다중선택일 때만)
+  if (multiSelect && multiOpts.length) {
+    const submitBtn = document.createElement("button");
+    submitBtn.className = "quick-btn quick-btn-submit";
+    submitBtn.textContent = "선택 완료 →";
+    submitBtn.onclick = () => {
+      const selected = Array.from(quickOptEl.querySelectorAll('.quick-btn-multi[data-selected="1"]'))
+        .map(b => b.dataset.value);
+      if (!selected.length) {
+        appendBotMessage("1개 이상 선택해주세요.", true);
+        return;
+      }
+      sendMessage(selected.join(" "));
+    };
+    quickOptEl.appendChild(submitBtn);
+  }
+
+  // 명령 옵션 (단일 클릭)
+  cmdOpts.forEach(opt => {
+    const btn = document.createElement("button");
     const isPrev = (
       opt.value === "__PREV__"
       || opt.value === "__CANCEL_EDIT__"

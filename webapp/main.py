@@ -250,17 +250,20 @@ async def chat(req: ChatRequest, request: Request):
     # 빠른 옵션 버튼 결정
     missing = bot._missing_required()
     quick_options = _quick_options_for(missing[0] if missing else None, bot)
+    # vibe 슬롯을 묻는 단계에선 다중선택 UI 활성화 (체크박스 + "선택 완료" 버튼)
+    quick_options_multi = (bot._last_asked_slot == "vibe")
 
     return {
-        "session_id":    session_id,
-        "bot_message":   reply,
-        "slot_status":   slot_status,
-        "quick_options": quick_options,
-        "is_complete":   is_done,
-        "v5_params":     v5_params if is_done else None,
-        "policy_cards":  bot.policy_cards,
-        "has_more_cards": bot.has_more_policy_cards,
-        "selection_error": bot._selection_error,
+        "session_id":          session_id,
+        "bot_message":         reply,
+        "slot_status":         slot_status,
+        "quick_options":       quick_options,
+        "quick_options_multi": quick_options_multi,
+        "is_complete":         is_done,
+        "v5_params":           v5_params if is_done else None,
+        "policy_cards":        bot.policy_cards,
+        "has_more_cards":      bot.has_more_policy_cards,
+        "selection_error":     bot._selection_error,
     }
 
 
