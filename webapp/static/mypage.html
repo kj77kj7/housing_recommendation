@@ -225,6 +225,64 @@
     </div>
   </div>
 
+  <!-- ══ 정책 정보 편집 모달 ════════════════════════════════════ -->
+  <div id="policy-edit-overlay" class="policy-edit-overlay" style="display:none" aria-hidden="true">
+    <div class="policy-edit-modal" role="dialog" aria-modal="true" aria-labelledby="policy-edit-title">
+      <div class="policy-edit-header">
+        <h3 class="policy-edit-title" id="policy-edit-title">정책 정보 편집</h3>
+        <button class="policy-edit-close" id="policy-edit-close" aria-label="닫기">✕</button>
+      </div>
+      <p class="policy-edit-note">바꾸고 싶은 항목만 선택하세요. 비워두면 그대로 유지됩니다.</p>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label">취업상태</label>
+        <div class="policy-edit-options" data-field="employment_status">
+          <button type="button" class="policy-edit-opt" data-value="">변경 안 함</button>
+          <button type="button" class="policy-edit-opt" data-value="취업자">취업자</button>
+          <button type="button" class="policy-edit-opt" data-value="미취업자">미취업자</button>
+          <button type="button" class="policy-edit-opt" data-value="자영업자">자영업자</button>
+        </div>
+      </div>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label">학력</label>
+        <div class="policy-edit-options" data-field="education_level">
+          <button type="button" class="policy-edit-opt" data-value="">변경 안 함</button>
+          <button type="button" class="policy-edit-opt" data-value="고졸이하">고졸 이하</button>
+          <button type="button" class="policy-edit-opt" data-value="대학재학">대학 재학</button>
+          <button type="button" class="policy-edit-opt" data-value="대졸">대학 졸업</button>
+          <button type="button" class="policy-edit-opt" data-value="석박사">석·박사</button>
+        </div>
+      </div>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label">주택소유</label>
+        <div class="policy-edit-options" data-field="has_own_house">
+          <button type="button" class="policy-edit-opt" data-value="">변경 안 함</button>
+          <button type="button" class="policy-edit-opt" data-value="0">무주택</button>
+          <button type="button" class="policy-edit-opt" data-value="1">주택 소유</button>
+        </div>
+      </div>
+
+      <div class="policy-edit-section">
+        <label class="policy-edit-label">월 소득</label>
+        <div class="policy-edit-options" data-field="income_range">
+          <button type="button" class="policy-edit-opt" data-value="">변경 안 함</button>
+          <button type="button" class="policy-edit-opt" data-value="200만원 이하">200만원 이하</button>
+          <button type="button" class="policy-edit-opt" data-value="200~300만원">200~300만원</button>
+          <button type="button" class="policy-edit-opt" data-value="300~400만원">300~400만원</button>
+          <button type="button" class="policy-edit-opt" data-value="400~500만원">400~500만원</button>
+          <button type="button" class="policy-edit-opt" data-value="500만원 이상">500만원 이상</button>
+        </div>
+      </div>
+
+      <div class="policy-edit-footer">
+        <button type="button" class="policy-edit-btn policy-edit-btn--cancel" id="policy-edit-cancel">취소</button>
+        <button type="button" class="policy-edit-btn policy-edit-btn--save" id="policy-edit-save">저장</button>
+      </div>
+    </div>
+  </div>
+
 <script>
   (function() {
     if (!localStorage.getItem('token')) {

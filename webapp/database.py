@@ -150,6 +150,8 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN education VARCHAR(20)")    # 학력
 
     # ── user_profile ──────────────────────────────────────
+    # has_own_house DEFAULT NULL — 사용자가 명시적으로 선택 안 하면 NULL 유지.
+    # (이전엔 DEFAULT 0 이라 마이페이지에서 다른 항목만 편집해도 INSERT 시 자동 "무주택" 으로 박히는 버그가 있었음)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_profile (
             id                INT AUTO_INCREMENT PRIMARY KEY,
@@ -157,13 +159,20 @@ def init_db():
             employment_status VARCHAR(20),
             education_level   VARCHAR(20),
             marriage_status   VARCHAR(20),
-            has_own_house     TINYINT DEFAULT 0,
+            has_own_house     TINYINT DEFAULT NULL,
             income_range      VARCHAR(50),
             asset_range       VARCHAR(50),
             last_updated      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
         ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
+    # 기존 DB(이미 생성된 user_profile.has_own_house DEFAULT 0)에 대한 마이그레이션 —
+    # MODIFY 로 DEFAULT 만 변경. 기존 행 데이터는 변경 없음 (사용자가 마이페이지에서 직접 수정 시까지 유지)
+    try:
+        cur.execute("ALTER TABLE user_profile MODIFY has_own_house TINYINT DEFAULT NULL")
+    except Exception as e:
+        # 이미 NULL 이거나 권한 문제 등 — 마이그레이션 실패해도 앱은 계속 동작
+        print(f"[migration] user_profile.has_own_house DEFAULT 변경 skip: {e}")
 
     # ── checklist_items ───────────────────────────────────
     cur.execute("""

@@ -232,33 +232,92 @@
         alert("닉네임 변경에 실패했어요.");
       }
     } else if (target === "policy") {
-      const employment = prompt("취업상태 (취업자/미취업자/자영업자)", "");
-      if (employment == null) return;
-      const education  = prompt("학력 (고졸이하/대학재학/대졸/석박사)", "");
-      if (education == null) return;
-      const income     = prompt("월소득 (예: 200~300만원)", "");
-      if (income == null) return;
+      openPolicyEditModal();
+    }
+  }
 
-      const body = {};
-      if (employment.trim()) body.employment_status = employment.trim();
-      if (education.trim())  body.education_level   = education.trim();
-      if (income.trim())     body.income_range      = income.trim();
-      if (!Object.keys(body).length) return;
+  // ── 정책 정보 편집 모달 ─────────────────────────────
+  function openPolicyEditModal() {
+    const overlay = document.getElementById("policy-edit-overlay");
+    if (!overlay) return;
 
-      try {
-        const res = await fetch((window.API_BASE||"") + `/user/${userId}/profile`, {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token,
-          },
-          body: JSON.stringify(body),
+    // 모든 옵션 초기화 — "변경 안 함"을 기본 선택
+    overlay.querySelectorAll(".policy-edit-options").forEach(group => {
+      const optsInGroup = group.querySelectorAll(".policy-edit-opt");
+      optsInGroup.forEach(o => o.classList.remove("selected"));
+      const noop = group.querySelector('[data-value=""]');
+      if (noop) noop.classList.add("selected");
+    });
+
+    // 클릭 시 그룹 내 단일 선택 (이벤트 위임 — 한 번만 바인딩)
+    if (!overlay.dataset.bound) {
+      overlay.dataset.bound = "1";
+      overlay.querySelectorAll(".policy-edit-options").forEach(group => {
+        group.addEventListener("click", (e) => {
+          const btn = e.target.closest(".policy-edit-opt");
+          if (!btn) return;
+          group.querySelectorAll(".policy-edit-opt").forEach(o => o.classList.remove("selected"));
+          btn.classList.add("selected");
         });
-        if (!res.ok) throw new Error("저장 실패");
-        location.reload();
-      } catch (e) {
-        alert("정책 정보 저장에 실패했어요.");
+      });
+      document.getElementById("policy-edit-close").addEventListener("click", closePolicyEditModal);
+      document.getElementById("policy-edit-cancel").addEventListener("click", closePolicyEditModal);
+      document.getElementById("policy-edit-save").addEventListener("click", savePolicyEditModal);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) closePolicyEditModal(); });
+    }
+
+    overlay.style.display = "flex";
+    overlay.setAttribute("aria-hidden", "false");
+  }
+
+  function closePolicyEditModal() {
+    const overlay = document.getElementById("policy-edit-overlay");
+    if (document.activeElement && overlay.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
+    overlay.style.display = "none";
+    overlay.setAttribute("aria-hidden", "true");
+  }
+
+  async function savePolicyEditModal() {
+    const overlay = document.getElementById("policy-edit-overlay");
+    const body = {};
+    overlay.querySelectorAll(".policy-edit-options").forEach(group => {
+      const field = group.dataset.field;
+      const selected = group.querySelector(".policy-edit-opt.selected");
+      if (!selected) return;
+      const val = selected.dataset.value;
+      if (val === "" || val == null) return;  // "변경 안 함" → 스킵
+      if (field === "has_own_house") {
+        body[field] = parseInt(val, 10);
+      } else {
+        body[field] = val;
       }
+    });
+
+    if (!Object.keys(body).length) {
+      alert("변경할 항목을 1개 이상 선택해주세요.");
+      return;
+    }
+
+    const saveBtn = document.getElementById("policy-edit-save");
+    saveBtn.disabled = true;
+    try {
+      const res = await fetch((window.API_BASE||"") + `/user/${userId}/profile`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + token,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("저장 실패");
+      closePolicyEditModal();
+      location.reload();
+    } catch (e) {
+      alert("정책 정보 저장에 실패했어요.");
+    } finally {
+      saveBtn.disabled = false;
     }
   }
 

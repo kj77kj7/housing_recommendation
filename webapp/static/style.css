@@ -2081,3 +2081,91 @@ body.modal-open {
   .fav-card-body { padding: 12px 14px; }
   .fav-heart { padding: 12px; font-size: 22px; }
 }
+
+/* ══════════════════════════════════════════════════════
+   정책 정보 편집 모달 (mypage)
+   ══════════════════════════════════════════════════════ */
+.policy-edit-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.policy-edit-modal {
+  background: #fff;
+  border-radius: 16px;
+  padding: 24px 28px;
+  width: 100%;
+  max-width: 540px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+}
+.policy-edit-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 4px;
+}
+.policy-edit-title {
+  font-size: 18px; font-weight: 700; color: #111827;
+  margin: 0;
+}
+.policy-edit-close {
+  background: none; border: none; cursor: pointer;
+  font-size: 18px; color: #6B7280;
+  width: 32px; height: 32px;
+  border-radius: 8px;
+}
+.policy-edit-close:hover { background: #F3F4F6; }
+.policy-edit-note {
+  font-size: 13px; color: #6B7280;
+  margin: 0 0 16px;
+}
+.policy-edit-section { margin-bottom: 14px; }
+.policy-edit-label {
+  display: block;
+  font-size: 13px; font-weight: 600; color: #374151;
+  margin-bottom: 6px;
+}
+.policy-edit-options {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.policy-edit-opt {
+  padding: 7px 12px;
+  border: 1.5px solid #E5E7EB;
+  border-radius: 18px;
+  background: #fff;
+  font-size: 13px;
+  color: #374151;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.policy-edit-opt:hover { border-color: var(--green); color: var(--green); }
+.policy-edit-opt.selected {
+  background: var(--green); color: #fff; border-color: var(--green);
+}
+.policy-edit-opt[data-value=""] { color: #9CA3AF; }
+.policy-edit-opt[data-value=""].selected { background: #6B7280; border-color: #6B7280; color: #fff; }
+
+.policy-edit-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid #E5E7EB;
+}
+.policy-edit-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px; font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.policy-edit-btn--cancel {
+  background: #F3F4F6; color: #6B7280;
+}
+.policy-edit-btn--cancel:hover { background: #E5E7EB; }
+.policy-edit-btn--save {
+  background: var(--green); color: #fff;
+}
+.policy-edit-btn--save:hover { background: #16A34A; }
+.policy-edit-btn--save:disabled { background: #D1D5DB; cursor: not-allowed; }
