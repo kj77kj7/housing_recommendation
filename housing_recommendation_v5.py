@@ -18,7 +18,7 @@ from youth_policy_module import (
     match_policies_for_property,   # v6.0 — 매물별 정책 매칭 (점수 X)
 )
 from feedback_module import collect_feedback, print_feedback_summary, get_feedback_count
-from vibe_module import get_vibe_weights, apply_vibe_to_infra_scores
+from vibe_module import get_vibe_weights, apply_vibe_to_infra_scores, INFRA_KEYS
 
 
 # =========================================================
@@ -1643,17 +1643,23 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
                 "similar_area_range": price_ctx.get("similar_area_range",""),
             })
 
-            # 생활 인프라 점수 계산 (필수 편의시설 선택 시)
-            if required_infra:
-                _vibe_w = get_vibe_weights(vibe_list) if vibe_list else None
+            # 생활 인프라 점수 계산 — vibe 가 설정되면 무조건 7개 인프라 점수 산출.
+            # (이전엔 required_infra(가중치≥1.3) 가 None 이면 계산을 아예 스킵해서,
+            #  vibe 다중선택 시 평균화로 임계값 미달 → 모든 매물 infra_score=0 표시되던 버그)
+            # 1km 초과 필터(infra_fail)는 strong 선호(가중치≥1.3)에만 적용.
+            if vibe_list:
+                _vibe_w = get_vibe_weights(vibe_list)
+                # 점수 산출용: 7개 모두 (vibe_weights 로 가중 평균)
                 infra = calc_infra_score(
                     float(mrow["cand_x"]), float(mrow["cand_y"]),
-                    required_infra, KAKAO_LOCAL_REST_API_KEY,
+                    INFRA_KEYS, KAKAO_LOCAL_REST_API_KEY,
                     vibe_weights=_vibe_w,
                 )
                 base["infra_score"]  = infra["infra_score"]
                 base["infra_detail"] = infra["infra_detail"]
-                base["infra_fail"]   = infra["infra_fail"]
+                # 1km 필터 — required_infra(strong) 만 적용
+                strict_set = set(required_infra or [])
+                base["infra_fail"]   = [f for f in infra["infra_fail"] if f in strict_set]
             else:
                 base["infra_score"]  = None
                 base["infra_detail"] = {}

@@ -449,19 +449,23 @@ function scrollToResults() {
 }
 
 // 검색 조건 칩 localStorage 저장 (추천 페이지 요약 바용)
+// 순서는 챗봇 요약(_build_summary)과 일치: 직장 → 이동수단 → 예산 → 통근 → 분위기 → 청년정책
 function saveCondChips(slots) {
   if (!slots) return;
   const map = {};
   slots.forEach(s => { if (s.filled) map[s.key] = s.value; });
   const chips = [];
-  if (map.work_address)  chips.push("📍 " + map.work_address);
+  if (map.work_address)    chips.push("📍 " + map.work_address);
+  if (map.transport_mode) {
+    const isCar = map.transport_mode === "car";
+    chips.push((isCar ? "🚗 " : "🚌 ") + (isCar ? "자가용" : "대중교통"));
+  }
   if (map.rent_type === "월세" && map.monthly_manwon) {
     chips.push("💰 월세 " + map.monthly_manwon + "만원");
   } else if (map.deposit_manwon) {
     chips.push("💰 전세 " + Number(map.deposit_manwon).toLocaleString() + "만원");
   }
   if (map.allowed_minutes) chips.push("🕐 통근 " + map.allowed_minutes + "분 이내");
-  if (map.transport_mode)  chips.push("🚌 " + (map.transport_mode === "car" ? "자가용" : "대중교통"));
   if (map.vibe)            chips.push("🏘 " + map.vibe);
   if (map.use_youth_policy === true || map.use_youth_policy === "true") chips.push("📋 청년정책 반영");
   localStorage.setItem("rec_cond_chips", JSON.stringify(chips));
