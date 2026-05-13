@@ -579,26 +579,27 @@ def _quick_options_for(slot: Optional[str], bot: ChatBot) -> list:
     if bot._done:
         return []
 
-    # ── 청년정책 세부 슬롯 (v6.0 — 카드 단계 제거) ──────────────
-    # 정책 슬롯에 매치된 경우에만 return. 매치 안 되면 (예: 정책=예 사용자가
-    # 일반 슬롯 수정 중) 아래의 일반 슬롯 분기로 fallthrough.
+    options: list = []
     asked = bot._last_asked_slot
+
+    # ── 청년정책 세부 슬롯 (v6.0 — 카드 단계 제거) ──────────────
+    # 매치되면 options 채움. 매치 안 되면 아래의 일반 슬롯 분기로 진입.
     if bot.slots.get("use_youth_policy") and asked:
         if asked == "policy_employment" and bot.slots.get("policy_employment") is None:
-            return [
+            options = [
                 {"label": "취업자",    "value": "취업자"},
                 {"label": "미취업자",  "value": "미취업자"},
                 {"label": "자영업자",  "value": "자영업자"},
             ]
-        if asked == "policy_education" and bot.slots.get("policy_education") is None:
-            return [
+        elif asked == "policy_education" and bot.slots.get("policy_education") is None:
+            options = [
                 {"label": "고졸이하",  "value": "① 고졸이하"},
                 {"label": "대학재학",  "value": "② 대학재학"},
                 {"label": "대졸",      "value": "③ 대졸"},
                 {"label": "석박사",    "value": "④ 석박사"},
             ]
-        if asked == "policy_income" and bot.slots.get("policy_income") is None:
-            return [
+        elif asked == "policy_income" and bot.slots.get("policy_income") is None:
+            options = [
                 {"label": "200만원 이하", "value": "① 200만원 이하"},
                 {"label": "200~300만원", "value": "② 200~300만원"},
                 {"label": "300~400만원", "value": "③ 300~400만원"},
@@ -606,19 +607,15 @@ def _quick_options_for(slot: Optional[str], bot: ChatBot) -> list:
                 {"label": "500만원 이상", "value": "⑤ 500만원 이상"},
                 {"label": "모름(없음)",     "value": "⑥ 모름"},
             ]
-        if asked == "policy_no_house" and bot.slots.get("policy_no_house") is None:
-            return [
+        elif asked == "policy_no_house" and bot.slots.get("policy_no_house") is None:
+            options = [
                 {"label": "무주택 (없음)", "value": "① 무주택"},
                 {"label": "주택 소유",     "value": "② 주택 소유"},
                 {"label": "모름",          "value": "③ 모름"},
             ]
-        # 정책 슬롯이 아니면 fallthrough → 아래 일반 슬롯 옵션 수집 분기로 진입
-        # (이전엔 여기서 return [] 하여 정책=예 사용자가 일반 슬롯 수정 시 버튼이 0개로 표시되는 버그)
 
-    # ── 일반 슬롯 옵션 수집 → 마지막에 "이전으로" 추가 ────────────────
-    options: list = []
-
-    if slot == "transport_mode":
+    # ── 일반 슬롯 옵션 수집 (정책 분기에서 매치 안 됐을 때만 진입) ──
+    if not options and slot == "transport_mode":
         options = [{"label": "자가용", "value": "자가용"}, {"label": "대중교통", "value": "대중교통"}]
     elif slot == "rent_type":
         options = [{"label": "전세", "value": "전세"}, {"label": "월세", "value": "월세"}]

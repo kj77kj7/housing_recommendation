@@ -1035,13 +1035,19 @@ class ChatBot:
             if not re.search(r"청년정책|정책\s*반영|정책\s*확인", user_text):
                 new_slots.pop("use_youth_policy", None)
 
-        # ── monthly_manwon LLM 결과 검증 및 보정 ────────────
-        # LLM이 숫자를 잘못 해석할 수 있으므로(예: "200만원" → 20),
+        # ── monthly_manwon / deposit_manwon LLM 결과 검증 및 보정 ────────────
+        # LLM(Gemini)이 숫자/단위를 잘못 해석하는 경우 잦음:
+        #   - "200만원" → 20 (단위 무시)
+        #   - "2억"   → 200000000000... (만원 단위가 아닌 원 단위로 환각, 0 과다)
         # 직접 파싱(_parse_manwon)이 성공하면 그 값으로 덮어씀.
         if self._last_asked_slot == "monthly_manwon":
             direct = _parse_manwon(user_text.strip())
             if direct is not None:
                 new_slots["monthly_manwon"] = direct
+        if self._last_asked_slot == "deposit_manwon":
+            direct = _parse_manwon(user_text.strip())
+            if direct is not None:
+                new_slots["deposit_manwon"] = direct
 
         # ── 슬롯-특화 답변에 대해 파서 결과로 LLM override ─────
         # LLM이 enum 값을 잘못 매핑하는 경우(특히 "직접설정")가 있어,

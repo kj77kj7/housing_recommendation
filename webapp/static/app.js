@@ -378,10 +378,14 @@ function showEditOptions() {
     { label: "직장 주소",   value: "__EDIT:work_address__" },
     { label: "이동수단",    value: "__EDIT:transport_mode__" },
     { label: "임대 유형",   value: "__EDIT:rent_type__" },
-    { label: "예산",        value: "__EDIT:deposit_manwon__" },
   ];
+  // 월세 사용자: deposit_manwon 은 "보증금"(전세금이 아님) + 월세 금액 별도 표시
+  // 전세 사용자: deposit_manwon 만 "예산" 으로 표시
   if (rentType === "월세") {
+    opts.push({ label: "보증금",    value: "__EDIT:deposit_manwon__" });
     opts.push({ label: "월세 금액", value: "__EDIT:monthly_manwon__" });
+  } else {
+    opts.push({ label: "예산",      value: "__EDIT:deposit_manwon__" });
   }
   opts.push(
     { label: "통근 시간",   value: "__EDIT:allowed_minutes__" },
