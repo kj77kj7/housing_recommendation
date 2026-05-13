@@ -948,6 +948,19 @@ class ChatBot:
             if direct is not None:
                 new_slots["monthly_manwon"] = direct
 
+        # ── 슬롯-특화 답변에 대해 파서 결과로 LLM override ─────
+        # LLM이 enum 값을 잘못 매핑하는 경우(특히 "직접설정")가 있어,
+        # 봇이 그 슬롯을 물어보고 있을 때엔 파서가 검출한 값이 LLM 결과보다 우선.
+        # (이전엔 new_slots[x] is None 일 때만 폴백 → LLM이 잘못된 값 채우면 못 고침)
+        if self._last_asked_slot == "weight_preference":
+            parsed = self._parse_weight_choice(user_text)
+            if parsed:
+                new_slots["weight_preference"] = parsed
+        if self._last_asked_slot == "house_type":
+            parsed = self._parse_house_choice(user_text)
+            if parsed is not None:
+                new_slots["house_type"] = parsed if parsed else "__none__"
+
         # ── 컨텍스트 인식 폴백 ──────────────────────────────
         # 봇이 직전에 특정 슬롯을 물어봤는데 LLM이 그 슬롯을 못 잡은 경우,
         # 사용자 발화를 해당 슬롯 값으로 직접 사용

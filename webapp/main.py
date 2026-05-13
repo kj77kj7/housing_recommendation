@@ -580,8 +580,10 @@ def _quick_options_for(slot: Optional[str], bot: ChatBot) -> list:
         return []
 
     # ── 청년정책 세부 슬롯 (v6.0 — 카드 단계 제거) ──────────────
-    if bot.slots.get("use_youth_policy") and bot._last_asked_slot:
-        asked = bot._last_asked_slot
+    # 정책 슬롯에 매치된 경우에만 return. 매치 안 되면 (예: 정책=예 사용자가
+    # 일반 슬롯 수정 중) 아래의 일반 슬롯 분기로 fallthrough.
+    asked = bot._last_asked_slot
+    if bot.slots.get("use_youth_policy") and asked:
         if asked == "policy_employment" and bot.slots.get("policy_employment") is None:
             return [
                 {"label": "취업자",    "value": "취업자"},
@@ -610,7 +612,8 @@ def _quick_options_for(slot: Optional[str], bot: ChatBot) -> list:
                 {"label": "주택 소유",     "value": "② 주택 소유"},
                 {"label": "모름",          "value": "③ 모름"},
             ]
-        return []
+        # 정책 슬롯이 아니면 fallthrough → 아래 일반 슬롯 옵션 수집 분기로 진입
+        # (이전엔 여기서 return [] 하여 정책=예 사용자가 일반 슬롯 수정 시 버튼이 0개로 표시되는 버그)
 
     # ── 일반 슬롯 옵션 수집 → 마지막에 "이전으로" 추가 ────────────────
     options: list = []
