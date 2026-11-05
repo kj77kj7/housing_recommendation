@@ -77,11 +77,21 @@
     } catch (e) { console.error("정책 정보 로드 실패:", e); }
   }
 
-  // ── 추천 매물 (sessionStorage — 일시적) ──────────────
-  function loadRecResults() {
-    const cached  = sessionStorage.getItem("rec_results_cache");
+  // ── 추천 매물 (이 탭 캐시 → 없으면 서버의 최근 추천) ──────
+  async function loadRecResults() {
+    let cached    = sessionStorage.getItem("rec_results_cache");
     const listEl  = document.getElementById("mp-rec-list");
     const countEl = document.getElementById("mp-rec-count");
+
+    // 이 탭에 결과가 없으면(새 탭·다른 기기 등) 서버에 저장된 최근 추천 결과 사용
+    if (!cached) {
+      try {
+        const res = await fetch((window.API_BASE || "") + "/api/recommend/latest",
+                                { headers: { "Authorization": "Bearer " + token } });
+        const d = res.ok ? await res.json() : null;
+        if (d && d.status === "complete") cached = JSON.stringify(d);
+      } catch { /* 무시 */ }
+    }
 
     if (!cached) {
       listEl.innerHTML = `<div class="mp-rec-empty">아직 추천받은 매물이 없어요.<br>아래 '조건 다시 설정하기'로 챗봇에서 조건을 입력해 주세요.</div>`;

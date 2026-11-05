@@ -39,6 +39,12 @@ const CHAT_HISTORY_KEY = "chat_history";
 const REC_CACHE_KEY    = "rec_results_cache";
 const SESSION_ID_KEY   = "chat_session_id";
 const QUICK_OPTS_KEY   = "chat_quick_options";   // 마지막 빠른선택 버튼 (페이지 이동 후 복원용)
+// 추천 세션·결과 개수·조건 칩은 탭마다 따로 (예전엔 localStorage 공유 → 다른 탭 조건이 섞이고
+// 다른 탭의 '새 추천 시작'이 이 탭 세션까지 지웠다). 새 탭은 서버의 '최근 추천'으로 이어본다.
+const REC_SESSION_KEY  = "rec_session_id";
+const REC_COUNT_KEY    = "rec_result_count";
+const REC_CHIPS_KEY    = "rec_cond_chips";
+const REC_POLL_MS      = 2000;
 
 // ── 인증 토큰 ────────────────────────────────────────────
 function getAuthHeaders() {
@@ -68,20 +74,17 @@ const PROGRESS_STEPS = [
 ];
 
 // ── 초기화 ───────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
-  if (localStorage.getItem("rec_session_id")) enableRecNav();
-
+document.addEventListener("DOMContentLoaded", async () => {
   renderProgressList([]);
   renderConditionTable([]);
 
   // 새로고침이면 채팅 기록 초기화, 내비게이션이면 기록 복원
   const navType = (performance.getEntriesByType("navigation")[0] || {}).type;
+  let restored = false;
   if (navType === "reload") {
     sessionStorage.removeItem(CHAT_HISTORY_KEY);
-    sessionStorage.removeItem(REC_CACHE_KEY);
     sessionStorage.removeItem(SESSION_ID_KEY);
-    // 새로고침 = 새 세션 → 이전 추천 결과 배지 클리어
-    localStorage.removeItem("rec_result_count");
+    sessionStorage.removeItem(QUICK_OPTS_KEY);
     showInitialMessage();
   } else {
     sessionId = sessionStorage.getItem(SESSION_ID_KEY) || null;
@@ -90,18 +93,26 @@ document.addEventListener("DOMContentLoaded", () => {
       restoreChatHistory(history);
       restoreQuickOptions();
       restoreResultButton();
+      restored = true;
     } else {
-      // 새 세션(채팅 히스토리 없음) → 이전 추천 결과 배지 클리어
-      localStorage.removeItem("rec_result_count");
       showInitialMessage();
     }
   }
-  // 페이지 진입 시 현재 배지 상태 동기화 (rec_result_count 가 0이면 배지 숨김)
   enableRecNav();
   inputEl.focus();
 
-  // 페이지 떠났다가 돌아온 사이 백엔드에서 추천 진행 중이면 결과 polling
-  resumeRecommendationIfNeeded();
+  // 마이페이지 '조건 다시 설정하기' → 이전 조건을 불러와 수정 메뉴로
+  if (new URLSearchParams(location.search).get("rerun") === "1") {
+    history.replaceState(null, "", "/");
+    await rerunFromLatest();
+    return;
+  }
+
+  // 이 탭에서 진행 중이던 추천 → 진행률 polling 재개
+  // 새 탭·새로고침 → 서버에 저장된 최근 추천이 진행 중/완료인지 확인
+  if (!(await resumeRecommendationIfNeeded()) && !restored) {
+    await offerLatestRecommendation();
+  }
 });
 
 // ── 초기 메시지 ──────────────────────────────────────────
@@ -182,7 +193,7 @@ async function sendMessage(text, label) {
     renderQuickOptions(data.quick_options, data.quick_options_multi);
 
     if (data.is_complete) {
-      localStorage.setItem("rec_session_id", sessionId);
+      sessionStorage.setItem(REC_SESSION_KEY, sessionId);
       saveCondChips(data.slot_status);
       enableRecNav();
       // 자동 추천 없음 — 사용자가 직접 선택
@@ -199,86 +210,34 @@ async function sendMessage(text, label) {
   }
 }
 
-// ── 자동 추천 실행 ───────────────────────────────────────
+// ── 추천 실행 ───────────────────────────────────────────
+// POST /api/recommend 는 바로 응답(running)하고, 진행률·결과는 GET /api/recommend/result 로 polling.
+// (예전엔 POST 하나가 4~7분 열려 있어 진행 상황을 알 수 없었다)
 async function startRecommendation(sid) {
-  if (isRecommending) return;
+  if (isRecommending || !sid) return;
   isRecommending = true;
-
-  // 새 추천 시작 → 이전 결과 카운트·캐시·배지 클리어
-  localStorage.removeItem("rec_result_count");
   sessionStorage.removeItem(REC_CACHE_KEY);
+  sessionStorage.removeItem(REC_COUNT_KEY);
+  resultsBtnEl.classList.remove("visible");
   enableRecNav();
-
-  // 진행 상태 플래그 — 페이지 이동 후 돌아왔을 때 복원에 사용
   sessionStorage.setItem("rec_in_progress", "1");
   sessionStorage.setItem("rec_in_progress_session", sid);
-
-  appendBotMessage(
-    "추천을 시작할게요 🔍\n" +
-    "공공데이터·외부 API 호출이 많아 약 4~7분 정도 걸려요.\n" +
-    "이 화면을 닫거나 다른 메뉴로 이동해도 추천은 계속 진행되니 잠시만 기다려 주세요."
-  );
   setWaiting(true);
+  showRecProgress({ percent: 0, message: "추천을 준비하고 있어요" });
 
   try {
     const res  = await fetch((window.API_BASE || "") + "/api/recommend", {
       method:  "POST",
       headers: getAuthHeaders(),
-      body:    JSON.stringify({ session_id: sid }),
+      body:    JSON.stringify({ session_id: sid, async: true }),   // 바로 응답받고 진행률 polling
     });
     const data = await res.json();
-
-    if (!res.ok || data.error) {
-      const rawErr = data.error || "";
-      if (data.user_message) {
-        appendBotMessage(data.user_message);
-        renderAfterRecommendOptions();
-      } else if (rawErr.includes("kakao") || rawErr.includes("ConnectionPool") || rawErr.includes("getaddrinfo")) {
-        appendBotMessage(
-          "주소 검색 서비스 연결에 실패했어요.\n" +
-          "네트워크를 확인하고 '주거 추천 결과 보기' 버튼으로 다시 시도해 주세요."
-        );
-      } else {
-        appendBotMessage(
-          "추천 중 오류가 발생했어요.\n" +
-          "'주거 추천 결과 보기' 버튼을 눌러 다시 시도해 보세요."
-        );
-      }
-      return;
-    }
-
-    const results = data.results || [];
-    const count   = results.length;
-
-    // 결과 sessionStorage 캐싱 (추천 페이지에서 재사용)
-    // workplace 좌표 포함 — 매물 모달의 예상 생활비 계산에 필요
-    sessionStorage.setItem(REC_CACHE_KEY, JSON.stringify({
-      results:         data.results,
-      seoul_avg:       data.seoul_avg || null,
-      workplace_lat:   data.workplace_lat,
-      workplace_lon:   data.workplace_lon,
-      allowed_minutes: data.allowed_minutes,
-      transport_mode:  data.transport_mode,
-      cond_chips:      data.cond_chips || null,
-    }));
-    localStorage.setItem("rec_result_count", String(count));
-    enableRecNav();
-
-    if (count > 0) {
-      appendBotMessage(
-        `추천이 완료됐어요! 🎉\n총 ${count}곳을 추천해드릴게요.\n아래 버튼을 눌러 결과를 확인해 보세요!`
-      );
-      // 추천 완료 후에야 버튼 활성화 (문제 5·6 fix)
-      resultsBtnEl.classList.add("visible");
-    } else {
-      appendBotMessage(
-        "조건에 맞는 매물이 없어요 😥\n조건을 조금 완화해서 다시 시도해 보세요."
-      );
-      renderAfterRecommendOptions(false);
-    }
+    await followRecommendation(sid, data, res.ok || res.status === 202);
   } catch (err) {
-    appendBotMessage("추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
     console.error(err);
+    finishRecProgress();
+    appendBotMessage("추천을 시작하지 못했어요. 네트워크를 확인하고 다시 시도해 주세요.");
+    renderAfterRecommendOptions();
   } finally {
     setWaiting(false);
     isRecommending = false;
@@ -287,88 +246,211 @@ async function startRecommendation(sid) {
   }
 }
 
+// 상태(data)를 받아 완료될 때까지 polling 하며 진행률 표시 → 결과 처리
+async function followRecommendation(sid, data, ok = true) {
+  const MAX_MS = 20 * 60 * 1000;
+  const startedAt = Date.now();
+  while (true) {
+    if (!ok || !data || data.status === "error") {
+      finishRecProgress();
+      const msg = (data && data.user_message)
+        || "추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.";
+      appendBotMessage(msg);
+      renderAfterRecommendOptions();
+      return;
+    }
+    if (data.status === "complete") {
+      finishRecProgress();
+      onRecommendationComplete(sid, data);
+      return;
+    }
+    if (data.status === "not_started") {
+      finishRecProgress();
+      appendBotMessage("추천 정보를 찾지 못했어요. 다시 추천을 시작해 주세요.");
+      renderAfterRecommendOptions();
+      return;
+    }
+    showRecProgress(data.progress || {});
+    if (Date.now() - startedAt > MAX_MS) {
+      finishRecProgress();
+      appendBotMessage("추천이 평소보다 오래 걸리고 있어요. 잠시 후 '주거 추천' 메뉴에서 결과를 확인해 주세요.");
+      return;
+    }
+    await new Promise(r => setTimeout(r, REC_POLL_MS));
+    try {
+      const res = await fetch(
+        (window.API_BASE || "") + "/api/recommend/result?session_id=" + encodeURIComponent(sid),
+        { headers: getAuthHeaders() }
+      );
+      ok = res.ok;
+      data = await res.json();
+    } catch (e) {
+      // 일시적인 연결 끊김 — 다음 주기에 다시 시도
+      ok = true;
+      data = { status: "running", progress: { percent: (data.progress || {}).percent || 0, message: "연결을 다시 확인하고 있어요" } };
+    }
+  }
+}
+
+function onRecommendationComplete(sid, data) {
+  const results = data.results || [];
+  const count   = results.length;
+  // 결과 sessionStorage 캐싱 (추천 페이지·마이페이지에서 재사용) — 어느 세션 결과인지 함께 저장
+  sessionStorage.setItem(REC_CACHE_KEY, JSON.stringify({
+    session_id:      sid,
+    results:         data.results,
+    seoul_avg:       data.seoul_avg || null,
+    workplace_lat:   data.workplace_lat,
+    workplace_lon:   data.workplace_lon,
+    allowed_minutes: data.allowed_minutes,
+    transport_mode:  data.transport_mode,
+    cond_chips:      data.cond_chips || null,
+  }));
+  sessionStorage.setItem(REC_SESSION_KEY, sid);
+  sessionStorage.setItem(REC_COUNT_KEY, String(count));
+  enableRecNav();
+  if (count > 0) {
+    appendBotMessage(`추천이 완료됐어요! 🎉\n총 ${count}곳을 추천해드릴게요.\n아래 버튼을 눌러 결과를 확인해 보세요!`);
+    resultsBtnEl.classList.add("visible");
+    // 조건을 바꿔 다시 찾을 수 있게 (예전엔 완료 후 버튼이 없어 '수정하기'를 직접 입력해야 했음)
+    renderQuickOptions([{ label: "수정하기 ✏️", value: "__EDIT__" }]);
+  } else {
+    appendBotMessage("조건에 맞는 매물이 없어요 😥\n조건을 조금 완화해서 다시 시도해 보세요.");
+    renderAfterRecommendOptions(false);
+  }
+}
+
+// ── 진행률 표시 (말풍선 안 진행 막대) ──────────────────────
+function showRecProgress(progress) {
+  removeTyping();
+  const pct = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
+  const msg = progress.message || "추천을 진행하고 있어요";
+  let row = document.getElementById("rec-progress-row");
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "rec-progress-row";
+    row.className = "msg-group bot";
+    row.innerHTML = `
+      <div class="bubble bot rec-progress-bubble" role="status" aria-live="polite">
+        <div class="rec-progress-title">🔍 맞춤 주거지를 찾고 있어요</div>
+        <div class="rec-progress-track"><div class="rec-progress-fill"></div></div>
+        <div class="rec-progress-meta">
+          <span class="rec-progress-msg"></span>
+          <span class="rec-progress-pct"></span>
+        </div>
+        <div class="rec-progress-note">💡 화면을 닫거나 다른 메뉴로 이동해도 추천은 계속 진행돼요.
+          나중에 '주거 추천' 메뉴에서 결과를 확인할 수 있어요.</div>
+      </div>`;
+    messagesEl.appendChild(row);
+    scrollBottom();
+  }
+  row.querySelector(".rec-progress-fill").style.width = pct + "%";
+  row.querySelector(".rec-progress-msg").textContent = msg;
+  row.querySelector(".rec-progress-pct").textContent = pct + "%";
+}
+
+function finishRecProgress() {
+  const row = document.getElementById("rec-progress-row");
+  if (row) row.remove();
+}
+
 // ── 페이지 진입 시 진행 중 추천 복원 ─────────────────────
-// 챗봇 페이지를 떠났다가 돌아왔을 때 (또는 새로고침 후),
-// 백엔드에서 추천이 계속 처리 중일 수 있음. GET 폴링으로 결과 가져옴.
+// 이 탭에서 시작한 추천이 진행 중이면 polling 재개. 처리했으면 true.
 async function resumeRecommendationIfNeeded() {
-  if (sessionStorage.getItem("rec_in_progress") !== "1") return;
+  if (sessionStorage.getItem("rec_in_progress") !== "1") return false;
   const sid = sessionStorage.getItem("rec_in_progress_session") || sessionId;
   if (!sid) {
     sessionStorage.removeItem("rec_in_progress");
     sessionStorage.removeItem("rec_in_progress_session");
-    return;
+    return false;
   }
-
   isRecommending = true;
   setWaiting(true);
-  appendBotMessage(
-    "추천이 진행 중이에요 🔍\n" +
-    "전체 약 4~7분 정도 걸리며, 결과 도착 시 자동으로 안내됩니다.",
-    true
-  );
-
-  const POLL_INTERVAL_MS = 5000;
-  const MAX_DURATION_MS  = 15 * 60 * 1000;
-  const startedAt = Date.now();
-
   try {
-    while (true) {
-      let data;
-      try {
-        const res = await fetch(
-          (window.API_BASE || "") + "/api/recommend/result?session_id=" + encodeURIComponent(sid),
-          { headers: getAuthHeaders() }
-        );
-        data = await res.json();
-      } catch (e) {
-        appendBotMessage("결과를 가져오는 중 연결 오류가 발생했어요.");
-        return;
-      }
-
-      if (data.status === "complete") {
-        const results = data.results || [];
-        const count   = results.length;
-        sessionStorage.setItem(REC_CACHE_KEY, JSON.stringify({
-          results:         data.results,
-          seoul_avg:       data.seoul_avg || null,
-          workplace_lat:   data.workplace_lat,
-          workplace_lon:   data.workplace_lon,
-          allowed_minutes: data.allowed_minutes,
-          transport_mode:  data.transport_mode,
-          cond_chips:      data.cond_chips || null,
-        }));
-        localStorage.setItem("rec_result_count", String(count));
-        enableRecNav();
-        if (count > 0) {
-          appendBotMessage(`추천이 완료됐어요! 🎉\n총 ${count}곳을 추천해드릴게요.\n아래 버튼을 눌러 결과를 확인해 보세요!`);
-          resultsBtnEl.classList.add("visible");
-        } else {
-          appendBotMessage("조건에 맞는 매물이 없어요 😥\n조건을 조금 완화해서 다시 시도해 보세요.");
-          renderAfterRecommendOptions(false);
-        }
-        return;
-      }
-      if (data.status === "error") {
-        appendBotMessage(data.user_message || "추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
-        renderAfterRecommendOptions();
-        return;
-      }
-      if (data.status === "not_started") {
-        // 백엔드 메모리에 봇 세션이 없음 (서버 재시작 등). 플래그 정리.
-        return;
-      }
-      // running — 계속 polling
-      if (Date.now() - startedAt > MAX_DURATION_MS) {
-        appendBotMessage("추천이 평소보다 오래 걸리고 있어요. 잠시 후 새로고침해 주세요.");
-        return;
-      }
-      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-    }
+    const res = await fetch(
+      (window.API_BASE || "") + "/api/recommend/result?session_id=" + encodeURIComponent(sid),
+      { headers: getAuthHeaders() }
+    );
+    await followRecommendation(sid, await res.json(), res.ok);
+  } catch (e) {
+    appendBotMessage("결과를 가져오는 중 연결 오류가 발생했어요.", true);
   } finally {
     setWaiting(false);
     isRecommending = false;
     sessionStorage.removeItem("rec_in_progress");
     sessionStorage.removeItem("rec_in_progress_session");
+  }
+  return true;
+}
+
+// 새 탭·새로고침: 서버에 저장된 이 사용자의 최근 추천이 있으면 안내 (진행 중이면 진행률 표시)
+async function offerLatestRecommendation() {
+  let data;
+  try {
+    const res = await fetch((window.API_BASE || "") + "/api/recommend/latest", { headers: getAuthHeaders() });
+    if (!res.ok) return;
+    data = await res.json();
+  } catch { return; }
+  if (!data || !data.session_id) return;
+  if (data.status === "running") {
+    appendBotMessage("진행 중인 추천이 있어요 🔍 결과가 나오면 바로 알려드릴게요.", true);
+    sessionStorage.setItem("rec_in_progress", "1");
+    sessionStorage.setItem("rec_in_progress_session", data.session_id);
+    await resumeRecommendationIfNeeded();
+  } else if (data.status === "complete" && (data.results || []).length) {
+    sessionStorage.setItem(REC_SESSION_KEY, data.session_id);
+    sessionStorage.setItem(REC_COUNT_KEY, String(data.results.length));
+    sessionStorage.setItem(REC_CACHE_KEY, JSON.stringify({
+      session_id: data.session_id, results: data.results, seoul_avg: data.seoul_avg || null,
+      workplace_lat: data.workplace_lat, workplace_lon: data.workplace_lon,
+      allowed_minutes: data.allowed_minutes, transport_mode: data.transport_mode,
+      cond_chips: data.cond_chips || null,
+    }));
+    enableRecNav();
+    resultsBtnEl.classList.add("visible");
+    appendBotMessage(`최근 추천 결과(${data.results.length}곳)가 있어요. 위의 '주거 추천 결과 보기'로 확인할 수 있어요.\n새로 찾으시려면 직장 주소부터 알려주세요.`, true);
+  }
+}
+
+// 마이페이지 '조건 다시 설정하기' — 최근 추천의 조건을 불러와 바로 수정 메뉴 표시
+async function rerunFromLatest() {
+  let sid = sessionId;
+  if (!sid) {
+    try {
+      const res = await fetch((window.API_BASE || "") + "/api/recommend/latest", { headers: getAuthHeaders() });
+      const d = res.ok ? await res.json() : null;
+      sid = d && d.session_id;
+    } catch { sid = null; }
+  }
+  if (!sid) {
+    appendBotMessage("이전에 입력한 조건이 없어요. 직장 주소부터 알려주세요.", true);
+    return;
+  }
+  sessionId = sid;
+  sessionStorage.setItem(SESSION_ID_KEY, sid);
+  setWaiting(true);
+  try {
+    const res = await fetch((window.API_BASE || "") + "/api/chat", {
+      method: "POST", headers: getAuthHeaders(),
+      body: JSON.stringify({ user_message: "__SUMMARY__", session_id: sid }),
+    });
+    const data = await res.json();
+    sessionId = data.session_id;
+    sessionStorage.setItem(SESSION_ID_KEY, sessionId);
+    updatePanels(data.slot_status);
+    latestSlotStatus = data.slot_status || null;
+    appendBotMessage("이전 조건을 불러왔어요 🔄\n\n" + data.bot_message);
+    if (data.is_complete) {
+      sessionStorage.setItem(REC_SESSION_KEY, sessionId);
+      setWaiting(false);
+      showEditOptions();
+    } else {
+      renderQuickOptions(data.quick_options, data.quick_options_multi);
+    }
+  } catch (e) {
+    appendBotMessage("이전 조건을 불러오지 못했어요. 직장 주소부터 알려주세요.", true);
+  } finally {
+    setWaiting(false);
   }
 }
 
@@ -429,17 +511,23 @@ function showEditOptions() {
 
 // ── 새 추천 시작 (초기화) ────────────────────────────────
 function resetChat() {
-  // 세션스토리지 초기화
+  // 대화가 진행된 상태면 한 번 확인 (실수로 눌러 대화가 통째로 사라지던 문제)
+  const hasConversation = getChatHistory().some(m => m.role === "user");
+  if (hasConversation && !confirm("지금까지 입력한 대화를 지우고 새로 시작할까요?")) return;
+  if (isRecommending) {
+    alert("추천이 진행 중이에요. 결과가 나온 뒤 새로 시작해 주세요.");
+    return;
+  }
+  // 세션스토리지 초기화 (이 탭만 — 다른 탭의 추천에는 영향 없음)
   sessionStorage.removeItem(CHAT_HISTORY_KEY);
   sessionStorage.removeItem(REC_CACHE_KEY);
   sessionStorage.removeItem(SESSION_ID_KEY);
   sessionStorage.removeItem(QUICK_OPTS_KEY);
   sessionStorage.removeItem("rec_in_progress");
   sessionStorage.removeItem("rec_in_progress_session");
-  // localStorage 추천 관련 초기화
-  localStorage.removeItem("rec_session_id");
-  localStorage.removeItem("rec_result_count");
-  localStorage.removeItem("rec_cond_chips");
+  sessionStorage.removeItem(REC_SESSION_KEY);
+  sessionStorage.removeItem(REC_COUNT_KEY);
+  sessionStorage.removeItem(REC_CHIPS_KEY);
 
   // 상태 초기화
   sessionId         = null;
@@ -469,7 +557,7 @@ function scrollToResults() {
   location.href = "/recommendation";
 }
 
-// 검색 조건 칩 localStorage 저장 (추천 페이지 요약 바용)
+// 검색 조건 칩 저장 (이 탭의 추천 페이지 요약 바용 — 결과에 칩이 없을 때의 폴백)
 // 순서는 챗봇 요약(_build_summary)과 일치: 직장 → 이동수단 → 예산 → 통근 → 분위기 → 청년정책
 function saveCondChips(slots) {
   if (!slots) return;
@@ -489,14 +577,14 @@ function saveCondChips(slots) {
   if (map.allowed_minutes) chips.push("🕐 통근 " + map.allowed_minutes + "분 이내");
   if (map.vibe)            chips.push("🏘 " + map.vibe);
   if (map.use_youth_policy === true || map.use_youth_policy === "true") chips.push("📋 청년정책 반영");
-  localStorage.setItem("rec_cond_chips", JSON.stringify(chips));
+  sessionStorage.setItem(REC_CHIPS_KEY, JSON.stringify(chips));
 }
 
 // 사이드바 추천 결과 배지 업데이트 (nav 자체는 항상 활성 상태)
 function enableRecNav() {
   const navBadge = document.getElementById("nav-rec-badge");
   if (navBadge) {
-    const count = parseInt(localStorage.getItem("rec_result_count") || "0", 10);
+    const count = parseInt(sessionStorage.getItem(REC_COUNT_KEY) || "0", 10);
     if (count > 0) {
       navBadge.textContent = count;
       navBadge.style.display = "";
@@ -551,8 +639,9 @@ function removeTyping() {
 function setWaiting(v) {
   isWaiting = v;
   sendBtn.disabled = v;
-  inputEl.disabled = v;
-  if (v) showTyping();
+  // 입력창은 막지 않음 — 기다리는 동안 다음 답을 미리 써 둘 수 있게 (전송은 응답 후)
+  inputEl.classList.toggle("is-waiting", v);
+  if (v && !document.getElementById("rec-progress-row")) showTyping();
 }
 
 function scrollBottom() {

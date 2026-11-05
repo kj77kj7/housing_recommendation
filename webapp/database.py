@@ -251,6 +251,24 @@ def init_db():
         ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """)
 
+    # ── chat_sessions (챗봇 대화 상태 + 추천 진행상태·결과) ─────────
+    # 서버 메모리에만 두던 세션을 저장 — 재배포·재시작에도 유지, 새 탭에서 진행 중인 추천 확인
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            session_id      VARCHAR(64) PRIMARY KEY,
+            user_id         INT NULL,
+            state_json      LONGTEXT,
+            rec_status      VARCHAR(16) DEFAULT 'idle',               -- idle/running/complete/error
+            rec_params_key  VARCHAR(64),
+            rec_progress    TEXT,
+            rec_result      LONGTEXT,
+            rec_error       TEXT,
+            rec_started_ts  DOUBLE,
+            updated_ts      DOUBLE,
+            INDEX idx_chat_sessions_user (user_id, updated_ts)
+        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    """)
+
     conn.commit()
     conn.close()
     params = _db_params()

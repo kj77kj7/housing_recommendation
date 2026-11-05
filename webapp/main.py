@@ -21,7 +21,9 @@ import io
 import json
 import uuid
 import asyncio
-import threading
+import contextvars
+import hashlib
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Optional
@@ -30,7 +32,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # 프로젝트 루트를 sys.path에 추가 (상위 폴더의 모듈 import)
 ROOT = Path(__file__).parent.parent
@@ -54,12 +56,16 @@ from webapp.password import router as password_router
 from webapp.user import router as user_router
 from webapp.checklist import router as checklist_router
 from webapp.favorites import router as favorites_router
+from webapp.session_store import store as session_store
 
 
 # ── DB 초기화 (서버 시작 시 1회) ─────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    n = session_store.recover_interrupted()
+    if n:
+        print(f"[startup] 재시작으로 중단된 추천 {n}건을 오류로 표시")
     await _log_outbound_ip()
     yield
 
@@ -133,21 +139,24 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # ──────────────────────────────────────────────────────────
 # 예전엔 추천 중 sys.stdout 자체를 StringIO 로 바꿨는데, 추천은 여러 스레드에서 동시에
 # 돌 수 있어 두 사용자의 로그가 섞이거나, 복원 순서가 꼬이면 서버 로그가 통째로 사라졌다.
-# 이제 sys.stdout 은 한 번만 이 라우터로 교체하고, capture() 한 스레드의 출력만
-# 해당 버퍼에도 복사한다 (서버 콘솔에도 그대로 남김).
+# 이제 sys.stdout 은 한 번만 이 라우터로 교체하고, capture() 한 작업의 출력만
+# 해당 버퍼에도 복사한다 (서버 콘솔에도 그대로 남김). ContextVar 라서 엔진이 병렬 처리용으로
+# 띄우는 작업 스레드(contextvars 복사)에도 같은 버퍼가 적용된다.
+_log_buf_var: "contextvars.ContextVar[Optional[io.StringIO]]" = contextvars.ContextVar("rec_log_buf", default=None)
+
+
 class _ThreadLocalStdout(io.TextIOBase):
     def __init__(self, real):
         self._real = real
-        self._local = threading.local()
 
     def capture(self, buf):
-        self._local.buf = buf
+        _log_buf_var.set(buf)
 
     def release(self):
-        self._local.buf = None
+        _log_buf_var.set(None)
 
     def write(self, s):
-        buf = getattr(self._local, "buf", None)
+        buf = _log_buf_var.get()
         if buf is not None:
             buf.write(s)
         return self._real.write(s)
@@ -166,9 +175,8 @@ _stdout_router: _ThreadLocalStdout = sys.stdout
 
 
 # ──────────────────────────────────────────────────────────
-# 세션 저장소 (프로세스 내 메모리)
+# 세션 — DB(chat_sessions) 저장 + 최근 세션 메모리 캐시 (webapp/session_store.py)
 # ──────────────────────────────────────────────────────────
-_sessions: Dict[str, ChatBot] = {}
 
 
 def _validate_workplace(address: str):
@@ -201,17 +209,33 @@ def _validate_workplace(address: str):
     return True, ""
 
 
-def _get_bot(session_id: str) -> ChatBot:
-    if session_id not in _sessions:
-        bot = ChatBot()
-        bot.address_validator = _validate_workplace
-        _sessions[session_id] = bot
-    return _sessions[session_id]
+def _bot_from_state(state: dict) -> ChatBot:
+    bot = ChatBot.from_state(state)
+    bot.address_validator = _validate_workplace
+    return bot
+
+
+def _user_id_from(request: Request) -> Optional[int]:
+    auth = request.headers.get("Authorization", "")
+    info = decode_token(auth[7:].strip()) if auth.startswith("Bearer ") else None
+    try:
+        return int(info.get("sub")) if info else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_owned_bot(session_id: str, user_id: Optional[int]):
+    """(ChatBot, owner_id) — 다른 사용자의 세션이면 (None, owner) 로 취급 (세션 id 만으로 남의 대화 접근 차단)."""
+    bot, owner = session_store.load_bot(session_id, _bot_from_state)
+    if bot is not None and owner is not None and owner != user_id:
+        return None, owner
+    return bot, owner
 
 
 def _params_key(v5_params: dict) -> str:
     """추천 조건 비교용 키 — 조건이 바뀌면 이전 추천 결과를 재사용하지 않는다."""
-    return json.dumps(v5_params, sort_keys=True, ensure_ascii=False, default=str)
+    raw = json.dumps(v5_params, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 def _cond_chips(bot: ChatBot) -> list:
@@ -256,6 +280,9 @@ class ChatRequest(BaseModel):
 
 class RecommendRequest(BaseModel):
     session_id: str
+    # True: 바로 응답(202 running) — 새 화면은 진행률을 polling.
+    # False(기본): 끝날 때까지 기다렸다 결과 반환 — 배포 직후 예전 화면(캐시된 JS)과의 호환용.
+    async_: bool = Field(False, alias="async")
 
 
 # ──────────────────────────────────────────────────────────
@@ -309,9 +336,6 @@ async def health():
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
-    session_id = req.session_id or str(uuid.uuid4())
-    bot = _get_bot(session_id)
-
     # 로그인 토큰에서 유저 정보 추출 (청년정책 1차 적용)
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     user_info = decode_token(token) if token else None
@@ -323,6 +347,13 @@ async def chat(req: ChatRequest, request: Request):
                 user_id = int(_sub)
             except (ValueError, TypeError):
                 user_id = None
+
+    session_id = req.session_id or str(uuid.uuid4())
+    bot, owner = await asyncio.to_thread(_load_owned_bot, session_id, user_id)
+    if bot is None:
+        if owner is not None:                       # 남의 세션 id → 새 세션으로
+            session_id = str(uuid.uuid4())
+        bot = _bot_from_state({})
 
     if user_info and not bot.user_meta:
         bot.user_meta = {
@@ -375,6 +406,11 @@ async def chat(req: ChatRequest, request: Request):
                 # 저장 완료 → 다음 turn 부터 _db_loaded 로 취급하여 중복 저장 방지
                 for slot in new_slots_to_save:
                     bot._db_loaded_slots.add(slot)
+                # 안내 없이 저장되던 문제 — 처음 저장할 때 한 번 알려줌
+                if not getattr(bot, "_profile_save_notified", False):
+                    bot._profile_save_notified = True
+                    reply += ("\n\nℹ️ 입력하신 청년정책 정보는 다음에 다시 묻지 않도록 '내 정보'에 저장했어요. "
+                              "마이페이지에서 언제든 바꿀 수 있어요.")
             except Exception as e:
                 print(f"[user_profile 저장 실패] user_id={user_id}: {e}")
 
@@ -383,6 +419,8 @@ async def chat(req: ChatRequest, request: Request):
     quick_options = _quick_options_for(missing[0] if missing else None, bot)
     # vibe 슬롯을 묻는 단계에선 다중선택 UI 활성화 (체크박스 + "선택 완료" 버튼)
     quick_options_multi = (bot._last_asked_slot == "vibe")
+
+    await asyncio.to_thread(session_store.save_bot, session_id, bot, user_id if owner is None else owner)
 
     return {
         "session_id":          session_id,
@@ -398,13 +436,9 @@ async def chat(req: ChatRequest, request: Request):
     }
 
 
-def _run_recommendation_sync(bot: ChatBot) -> dict:
-    """실제 추천 작업을 수행하는 sync 함수.
-    /api/recommend 가 락 안에서 호출함. 결과를 dict로 반환 (예외 시 raise)."""
-    import time
+def _run_recommendation_sync(v5_params: dict, cond_chips: list, progress_cb=None) -> dict:
+    """실제 추천 작업 (sync). 백그라운드 작업이 스레드에서 호출. 결과 dict 반환 (예외 시 raise)."""
     t0 = time.perf_counter()
-
-    v5_params = bot.get_v5_params()
 
     import glob as glob_mod
     gz_files   = sorted(glob_mod.glob(str(ROOT / "사용_csv_모음" / "*주거비*.csv.gz")))
@@ -422,6 +456,7 @@ def _run_recommendation_sync(bot: ChatBot) -> dict:
         from housing_recommendation_v5 import run_recommendation
         final_df, seoul_avg = run_recommendation(
             housing_csv_path=csv_path,
+            progress_cb=progress_cb,
             **v5_params,
         )
         results = _df_to_list(final_df)
@@ -449,106 +484,152 @@ def _run_recommendation_sync(bot: ChatBot) -> dict:
             # v5_params 의 통근 허용 키는 allowed_commute_min (예전엔 없는 키를 읽어 항상 null)
             "allowed_minutes": v5_params.get("allowed_commute_min"),
             "transport_mode":  v5_params.get("transport_mode"),
-            "cond_chips":      _cond_chips(bot),
+            "cond_chips":      cond_chips,
+            "elapsed_sec":     round(elapsed, 1),
         }
     finally:
         _stdout_router.release()
 
 
+# 동시에 돌 수 있는 추천 수 (메모리·외부 API 한도 보호). 넘으면 순서를 기다림.
+_REC_SLOTS: Optional[asyncio.Semaphore] = None   # 이벤트 루프 안에서 처음 쓸 때 생성
+_jobs: Dict[str, "asyncio.Task"] = {}
+
+
+def _rec_slots() -> asyncio.Semaphore:
+    global _REC_SLOTS
+    if _REC_SLOTS is None:
+        _REC_SLOTS = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_RECOMMENDATIONS", "3")))
+    return _REC_SLOTS
+
+
+def _rec_response(session_id: str, rec: dict) -> dict:
+    """저장된 추천 상태 → API 응답 형태."""
+    st = rec.get("status") or "idle"
+    if st == "complete" and rec.get("result"):
+        return {"status": "complete", "session_id": session_id, **rec["result"]}
+    if st == "running":
+        return {"status": "running", "session_id": session_id,
+                "progress": rec.get("progress") or {"percent": 0, "message": "추천을 준비하고 있어요"}}
+    if st == "error":
+        return {"status": "error", "session_id": session_id, **(rec.get("error") or {"error": "추천 처리 중 오류"})}
+    return {"status": "not_started", "session_id": session_id}
+
+
+async def _recommend_job(session_id: str, user_id: Optional[int], v5_params: dict, params_key: str, chips: list):
+    def _still_current() -> bool:
+        return session_store.get_rec(session_id).get("params_key") == params_key
+
+    def _progress(pct: int, msg: str):
+        if _still_current():
+            session_store.set_rec(session_id, force_db=False,
+                                  progress={"percent": pct, "message": msg, "updated_ts": time.time()})
+
+    try:
+        if _rec_slots().locked():
+            _progress(0, "다른 추천이 끝나길 기다리고 있어요 (잠시만요)")
+        async with _rec_slots():
+            _progress(1, "추천을 시작했어요")
+            result = await asyncio.to_thread(_run_recommendation_sync, v5_params, chips, _progress)
+        if _still_current():
+            session_store.set_rec(session_id, user_id=user_id, status="complete", result=result,
+                                  progress={"percent": 100, "message": "추천을 마쳤어요"})
+    except Exception as e:
+        import traceback
+        print(f"[추천 API] 오류 session={session_id[:8]} — {e}")
+        traceback.print_exc()
+        if _still_current():
+            session_store.set_rec(session_id, user_id=user_id, status="error", error=_error_payload(e))
+    finally:
+        if _jobs.get(session_id) is asyncio.current_task():
+            _jobs.pop(session_id, None)
+
+
 @app.post("/api/recommend")
-async def recommend(req: RecommendRequest):
-    """추천 트리거 + 대기 + 결과 반환.
+async def recommend(req: RecommendRequest, request: Request):
+    """추천 시작 — 바로 응답하고(202) 작업은 백그라운드에서 진행. 진행률·결과는 GET /api/recommend/result.
 
-    동일 session_id 에서 여러 번 호출돼도 실제 작업은 1회만 실행되도록 락·캐시 적용:
-      1) 이미 완료된 결과(_recommendation_result)가 있으면 즉시 반환
-      2) 다른 호출이 처리 중(_recommendation_status == "running")이면 락 대기
-         (대기 끝나면 캐시에 결과 있을 것 — 다시 1)로)
-      3) idle 이면 락 획득하고 sync 작업 실행 → 결과 캐시 → 반환
+    예전엔 이 요청 하나가 추천이 끝날 때까지(수 분) 열려 있어, 화면을 닫거나 다른 탭에서는
+    진행 상황을 알 수 없었다. 이제 상태를 DB 에 저장하므로 새 탭·서버 재시작 후에도 조회된다.
+      - 같은 조건으로 이미 완료 → 결과 즉시 반환 (complete)
+      - 같은 조건으로 진행 중 → 진행률 반환 (running)
+      - 조건이 바뀌었으면(수정하기 후) 새로 시작
     """
-    import time
-    t0 = time.perf_counter()
-    print(f"[추천 API] 진입 session={req.session_id[:8]}... status={None}")
-
-    bot = _get_bot(req.session_id)
+    user_id = _user_id_from(request)
+    bot, owner = await asyncio.to_thread(_load_owned_bot, req.session_id, user_id)
+    if bot is None:
+        return JSONResponse(status_code=404 if owner is not None else 400,
+                            content={"error": "세션을 찾을 수 없어요", "status": "not_started"})
     if not bot._done:
         return JSONResponse(status_code=400, content={"error": "슬롯 미완성"})
 
-    # 락 lazy 초기화 (이 함수 안 event loop 기준)
-    if bot._recommendation_lock is None:
-        bot._recommendation_lock = asyncio.Lock()
+    v5_params  = bot.get_v5_params()
+    params_key = _params_key(v5_params)
+    rec = await asyncio.to_thread(session_store.get_rec, req.session_id)
+    if rec.get("params_key") == params_key:
+        if rec.get("status") == "complete" and rec.get("result"):
+            print(f"[추천 API] 캐시 hit session={req.session_id[:8]}")
+            return _rec_response(req.session_id, rec)
+        if rec.get("status") == "running" and req.session_id in _jobs:
+            return await _respond_recommend(req, _jobs[req.session_id])
 
-    # 조건이 바뀌었으면(수정하기 후 재추천) 이전 결과를 재사용하지 않음
-    params_key = _params_key(bot.get_v5_params())
+    owner_id = owner if owner is not None else user_id
+    print(f"[추천 API] 작업 시작 session={req.session_id[:8]}")
+    await asyncio.to_thread(
+        session_store.set_rec, req.session_id, user_id=owner_id, status="running", params_key=params_key,
+        progress={"percent": 0, "message": "추천을 준비하고 있어요"}, result=None, error=None,
+        started_ts=time.time(),
+    )
+    task = asyncio.create_task(
+        _recommend_job(req.session_id, owner_id, v5_params, params_key, _cond_chips(bot)))
+    _jobs[req.session_id] = task
+    return await _respond_recommend(req, task)
 
-    def _cache_valid() -> bool:
-        return (bot._recommendation_status == "complete"
-                and bot._recommendation_result is not None
-                and getattr(bot, "_recommendation_params_key", None) == params_key)
 
-    # 1) 같은 조건으로 이미 완료된 결과가 있으면 즉시 반환
-    if _cache_valid():
-        print(f"[추천 API] 캐시 hit session={req.session_id[:8]}")
-        return bot._recommendation_result
-
-    # 2) 락 획득 — 동시 호출은 대기 (먼저 들어온 호출이 작업 수행, 나머지는 대기)
-    async with bot._recommendation_lock:
-        # 락 안에서 다시 캐시 확인 (대기 중에 다른 호출이 완료했을 수 있음)
-        if _cache_valid():
-            print(f"[추천 API] 락 대기 중 캐시 채워짐 session={req.session_id[:8]}")
-            return bot._recommendation_result
-
-        # 3) 실제 작업 실행
-        bot._recommendation_status = "running"
-        bot._recommendation_error  = None
-        bot._recommendation_error_payload = None
-        bot._recommendation_result = None
-        bot._recommendation_params_key = params_key
-        print(f"[추천 API] 작업 시작 session={req.session_id[:8]}")
-        try:
-            # 추천은 sync(blocking) — event loop 차단 막기 위해 thread executor 위에서 실행.
-            # 이렇게 해야 같은 worker 안 다른 요청(GET /api/recommend/result 등)도 동시 처리 가능.
-            result = await asyncio.to_thread(_run_recommendation_sync, bot)
-            bot._recommendation_result = result
-            bot._recommendation_status = "complete"
-            return result
-        except Exception as e:
-            elapsed = time.perf_counter() - t0
-            import traceback
-            print(f"[추천 API] 오류 {elapsed:.1f}s — {e}")
-            traceback.print_exc()
-            payload = _error_payload(e)
-            bot._recommendation_status = "error"
-            bot._recommendation_error  = str(e)
-            bot._recommendation_error_payload = payload
-            status = 503 if payload.get("error_code") else 500
-            return JSONResponse(status_code=status, content=payload)
+async def _respond_recommend(req: RecommendRequest, task: "asyncio.Task"):
+    if req.async_:
+        return JSONResponse(status_code=202, content=_rec_response(
+            req.session_id, session_store.get_rec(req.session_id)))
+    # 예전 방식 클라이언트 — 작업이 끝날 때까지 기다렸다가 예전 응답 형태로 반환
+    await asyncio.shield(task)
+    data = _rec_response(req.session_id, session_store.get_rec(req.session_id))
+    if data.get("status") == "error":
+        return JSONResponse(status_code=503 if data.get("error_code") else 500, content=data)
+    return data
 
 
 @app.get("/api/recommend/result")
-async def recommend_result(session_id: str):
-    """추천 결과 조회 전용 엔드포인트 (트리거 안 함).
-
-    /recommendation 페이지와 챗봇 페이지 진입 시 이걸로 상태 확인:
-      - status="complete" : 결과 본문 포함 즉시 반환
-      - status="running"  : "처리 중" 응답 (클라이언트가 일정 간격 polling)
-      - status="idle"/"error" : 안내 메시지
-    """
+async def recommend_result(session_id: str, request: Request):
+    """추천 상태·결과 조회 (트리거 안 함). running 이면 progress {percent, message} 포함."""
     if not session_id:
         return JSONResponse(status_code=400, content={"status": "error", "error": "session_id 누락"})
-    bot = _sessions.get(session_id)
-    if bot is None:
-        # 세션이 메모리에 없음 = 추천 시작한 적 없음 (또는 서버 재시작)
-        return {"status": "not_started"}
+    user_id = _user_id_from(request)
+    rec = await asyncio.to_thread(session_store.get_rec, session_id)
+    owner = rec.get("user_id")
+    if owner is not None and owner != user_id:
+        return {"status": "not_started", "session_id": session_id}
+    # 이 프로세스에서 돌고 있지 않은 'running' (재시작 등) → 중단으로 처리
+    if rec.get("status") == "running" and session_id not in _jobs:
+        started = rec.get("started_ts") or 0
+        if time.time() - started > 60:
+            err = {"error": "interrupted", "error_code": "interrupted",
+                   "user_message": "추천이 중단됐어요. '다시 추천'을 눌러 주세요."}
+            await asyncio.to_thread(session_store.set_rec, session_id, status="error", error=err)
+            rec = session_store.get_rec(session_id)
+    return _rec_response(session_id, rec)
 
-    if bot._recommendation_status == "complete" and bot._recommendation_result:
-        return {"status": "complete", **bot._recommendation_result}
-    if bot._recommendation_status == "running":
-        return {"status": "running"}
-    if bot._recommendation_status == "error":
-        payload = getattr(bot, "_recommendation_error_payload", None) or {
-            "error": bot._recommendation_error or "추천 처리 중 오류"}
-        return {"status": "error", **payload}
-    return {"status": "not_started"}
+
+@app.get("/api/recommend/latest")
+async def recommend_latest(request: Request):
+    """로그인 사용자의 가장 최근 추천 (진행 중/완료) — 새 탭·창에서 이어보기용."""
+    user_id = _user_id_from(request)
+    if user_id is None:
+        return JSONResponse(status_code=401, content={"status": "error", "error": "로그인이 필요합니다"})
+    sid = await asyncio.to_thread(session_store.latest_for_user, user_id)
+    if not sid:
+        return {"status": "none"}
+    rec = await asyncio.to_thread(session_store.get_rec, sid)
+    return _rec_response(sid, rec)
 
 
 @app.post("/api/expense")
@@ -710,6 +791,8 @@ def _df_to_list(df) -> list:
             "lon":           _safe_float(row.get("cand_x"), 0.0),
             # 점수 (0~100 정수)
             "score":         _to_pct(score),               # 종합 (final_score)
+            # 소수점 1자리 — 정수로는 상위 매물이 동점으로 보이는 경우가 많아 표시·정렬용
+            "score_precise": round(min(100.0, max(0.0, _safe_float(score) * (100 if _safe_float(score) <= 1.0 else 1))), 1),
             "commute_score": _to_pct(row.get("commute_score")),
             "cost_score":    _to_pct(row.get("housing_score")),
             "infra_score":   _to_pct(row.get("infra_score")),

@@ -49,7 +49,7 @@ let _kakaoWorkMarker = null;
 let _mapInitialized  = false;
 
 // ── 초기화 ───────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   // 사이드바 지도뷰 메뉴 활성화 (추천 페이지에 진입한 시점에는 항상 결과가 있을 수 있음)
   const navMap = document.getElementById("nav-map");
   if (navMap) {
@@ -68,22 +68,21 @@ document.addEventListener("DOMContentLoaded", () => {
     if (v !== _currentView) switchView(v, false);
   });
 
-  const sessionId = localStorage.getItem("rec_session_id");
-  if (!sessionId) {
-    showState("no-session");
-    return;
-  }
   attachControlHandlers();
   // 모달은 property-modal.js 에서 자체적으로 DOMContentLoaded 시 부착됨
 
   // 매물 모달이 idx로 결과를 조회할 때 사용할 provider 등록 (정렬된 결과 반환)
   window.__modalResultsProvider = () => sortedResults();
 
-  // 챗봇에서 자동 추천한 결과가 sessionStorage에 있으면 API 재호출 없이 바로 렌더링
+  // 이 탭의 추천 세션 (탭마다 따로). 없으면(새 탭·새 창) 서버에 저장된 이 사용자의 최근 추천.
+  let sessionId = sessionStorage.getItem("rec_session_id");
+
+  // 챗봇에서 받은 결과가 이 탭에 캐시돼 있으면 API 재호출 없이 바로 렌더링 (같은 세션일 때만)
   const cached = sessionStorage.getItem("rec_results_cache");
-  if (cached) {
+  if (cached && sessionId) {
     try {
       const parsed = JSON.parse(cached);
+      if (parsed.session_id && parsed.session_id !== sessionId) throw new Error("다른 세션 캐시");
       _allResults = parsed.results   || [];
       _seoulAvg   = parsed.seoul_avg || null;
       _workplaceCoords = (parsed.workplace_lat != null && parsed.workplace_lon != null)
@@ -97,9 +96,19 @@ document.addEventListener("DOMContentLoaded", () => {
         renderPage();
         return;
       }
-    } catch { /* 파싱 실패 시 API 재호출 */ }
+    } catch { /* 파싱 실패·다른 세션 → API 조회 */ }
   }
 
+  if (!sessionId) {
+    showState("loading");
+    try {
+      const res = await fetch((window.API_BASE || "") + "/api/recommend/latest", { headers: getAuthHeaders() });
+      const d = res.ok ? await res.json() : null;
+      sessionId = d && d.session_id;
+    } catch { sessionId = null; }
+    if (!sessionId) { showState("no-session"); return; }
+    sessionStorage.setItem("rec_session_id", sessionId);
+  }
   loadResults(sessionId);
 });
 
@@ -113,8 +122,8 @@ document.addEventListener("DOMContentLoaded", () => {
 async function loadResults(sessionId) {
   showState("loading");
 
-  const POLL_INTERVAL_MS  = 5000;     // 5초 간격 polling
-  const MAX_POLL_DURATION = 15 * 60 * 1000;  // 최대 15분 polling (이후 타임아웃 처리)
+  const POLL_INTERVAL_MS  = 2000;     // 2초 간격 polling (진행률 갱신)
+  const MAX_POLL_DURATION = 20 * 60 * 1000;  // 최대 20분 polling (이후 타임아웃 처리)
   const startedAt = Date.now();
 
   async function fetchStatus() {
@@ -151,6 +160,7 @@ async function loadResults(sessionId) {
       //  /recommendation 으로 이동해 GET 폴링으로 결과를 받는 경로에선 캐시가 비어 있어
       //  mypage 추천 매물 0건·favorites 생활비 영수증 미표시 문제 발생했음)
       sessionStorage.setItem("rec_results_cache", JSON.stringify({
+        session_id:      sessionId,
         results:         data.results,
         seoul_avg:       data.seoul_avg || null,
         workplace_lat:   data.workplace_lat,
@@ -159,7 +169,7 @@ async function loadResults(sessionId) {
         transport_mode:  data.transport_mode,
         cond_chips:      data.cond_chips || null,
       }));
-      localStorage.setItem("rec_result_count", String(_allResults.length));
+      sessionStorage.setItem("rec_result_count", String(_allResults.length));
 
       if (!_allResults.length) {
         showError("조건에 맞는 추천 결과가 없어요. 챗봇에서 조건을 조정해 보세요.", true);
@@ -183,13 +193,37 @@ async function loadResults(sessionId) {
       return;
     }
 
-    // status === "running" — 추천 처리 중. polling 계속.
+    // status === "running" — 추천 처리 중. 진행률 표시 후 polling 계속.
+    renderLoadingProgress(data.progress || {});
     if (Date.now() - startedAt > MAX_POLL_DURATION) {
       showError("추천이 평소보다 오래 걸리고 있어요. 잠시 후 새로고침해 주세요.");
       return;
     }
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
   }
+}
+
+// 추천 진행 중 — 로딩 화면에 진행 막대 + 안내 표시
+function renderLoadingProgress(progress) {
+  const pct = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
+  let box = document.getElementById("rec-loading-progress");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "rec-loading-progress";
+    box.className = "rec-progress-bubble rec-progress-standalone";
+    box.setAttribute("role", "status");
+    box.innerHTML = `
+      <div class="rec-progress-title">🔍 맞춤 주거지를 찾고 있어요</div>
+      <div class="rec-progress-track"><div class="rec-progress-fill"></div></div>
+      <div class="rec-progress-meta"><span class="rec-progress-msg"></span><span class="rec-progress-pct"></span></div>
+      <div class="rec-progress-note">💡 이 화면을 닫거나 다른 메뉴로 이동해도 추천은 계속 진행돼요.
+        나중에 다시 '주거 추천' 메뉴로 오면 결과를 볼 수 있어요.</div>`;
+    loadingEl.innerHTML = "";
+    loadingEl.appendChild(box);
+  }
+  box.querySelector(".rec-progress-fill").style.width = pct + "%";
+  box.querySelector(".rec-progress-msg").textContent = progress.message || "추천을 진행하고 있어요";
+  box.querySelector(".rec-progress-pct").textContent = pct + "%";
 }
 
 // ── 컨트롤 이벤트 ─────────────────────────────────────────
@@ -242,6 +276,11 @@ function ensureMapReady() {
       '<div class="rec-map-error">❌ 카카오맵 SDK 로드 실패 — 네트워크/도메인 등록을 확인하세요.</div>';
     return;
   }
+  // 타일이 그려질 때까지 '불러오는 중' 표시 (전환 직후 1~4초 흰 화면이던 문제)
+  const loadingTip = document.createElement("div");
+  loadingTip.className = "rec-map-loading";
+  loadingTip.textContent = "🗺️ 지도를 불러오는 중…";
+  mapViewEl.appendChild(loadingTip);
   kakao.maps.load(() => {
     const container = document.getElementById("rec-map-canvas");
     _kakaoMap = new kakao.maps.Map(container, {
@@ -249,6 +288,10 @@ function ensureMapReady() {
       level: 7,
     });
     _mapInitialized = true;
+    kakao.maps.event.addListener(_kakaoMap, "tilesloaded", () => loadingTip.remove());
+    setTimeout(() => loadingTip.remove(), 8000);
+    // 줌아웃(넓게 보기)에서는 라벨끼리 겹치므로 숨기고, 확대하면 표시
+    kakao.maps.event.addListener(_kakaoMap, "zoom_changed", updateMapLabelVisibility);
     renderMapMarkers();
   });
 }
@@ -274,7 +317,8 @@ function renderMapMarkers() {
     const pos = new kakao.maps.LatLng(r.lat, r.lon);
     bounds.extend(pos);
 
-    const marker = new kakao.maps.Marker({ map: _kakaoMap, position: pos, title: r.address || (r.gu + " " + r.dong) });
+    const marker = new kakao.maps.Marker({ map: _kakaoMap, position: pos,
+      title: `${idx + 1}위 · ${r.address || (r.gu + " " + r.dong)}` });
     kakao.maps.event.addListener(marker, "click", () => openPropertyModal(idx));
     _kakaoMarkers.push(marker);
 
@@ -333,6 +377,17 @@ function renderMapMarkers() {
 
   // 모든 마커가 보이도록 자동 fit
   if (!bounds.isEmpty()) _kakaoMap.setBounds(bounds);
+  updateMapLabelVisibility();
+}
+
+// 라벨 표시 기준 — 카카오맵 level 은 작을수록 확대. 화면이 좁으면 한 단계 더 확대돼야 표시.
+function updateMapLabelVisibility() {
+  if (!_kakaoMap) return;
+  const maxLevel = window.innerWidth <= 768 ? 4 : 5;
+  const show = _kakaoMap.getLevel() <= maxLevel;
+  _kakaoOverlays.forEach(o => o.setMap(show ? _kakaoMap : null));
+  const hint = document.getElementById("rec-map-label-hint");
+  if (hint) hint.style.display = show ? "none" : "";
 }
 
 // 매물 마커 위 라벨 HTML
@@ -349,7 +404,7 @@ function renderMapLabel(r, idx) {
     '<div class="rec-map-marker-label" onclick="openPropertyModal(' + Number(idx) + ')">' +
       '<div class="rec-map-marker-name">' + escHtml(name) + '</div>' +
       '<div class="rec-map-marker-meta">' +
-        '<span class="rec-map-marker-score">⭐ ' + score + '</span>' +
+        '<span class="rec-map-marker-score">⭐ ' + scoreText(r) + '</span>' +
         (priceTxt ? '<span class="rec-map-marker-price">' + priceTxt + '</span>' : '') +
       '</div>' +
     '</div>'
@@ -367,7 +422,7 @@ function computeCommuteRadiusMeters(minutes, mode) {
 function sortedResults() {
   const sorted = [..._allResults];
   if (_currentSort === "score") {
-    sorted.sort((a, b) => (b.score || 0) - (a.score || 0));
+    sorted.sort((a, b) => (b.score_precise ?? b.score ?? 0) - (a.score_precise ?? a.score ?? 0));
   } else if (_currentSort === "commute") {
     sorted.sort((a, b) => (a.commute_min || 999) - (b.commute_min || 999));
   } else if (_currentSort === "price") {
@@ -394,7 +449,7 @@ function renderPage() {
       navBadgeEl.style.display = "none";
     }
   }
-  localStorage.setItem("rec_result_count", String(results.length));
+  sessionStorage.setItem("rec_result_count", String(results.length));
 
   // 컨트롤 카운트 버튼 라벨
   if (countBtnEl) countBtnEl.textContent = `추천 ${results.length}개`;
@@ -433,7 +488,7 @@ let _initialViewApplied = false;
 function renderConditionBar() {
   let chips = Array.isArray(_condChips) ? _condChips : null;
   if (!chips) {
-    try { chips = JSON.parse(localStorage.getItem("rec_cond_chips") || "[]"); } catch { chips = []; }
+    try { chips = JSON.parse(sessionStorage.getItem("rec_cond_chips") || "[]"); } catch { chips = []; }
   }
   if (!chips.length) {
     condBarEl.style.display = "none";
@@ -494,7 +549,7 @@ function renderTopCard(r, idx) {
     <div class="rec-top-card" onclick="openPropertyModal(0)">
       <div class="rec-top-image">
         <div class="rec-rank-badge">🏆 1위 추천</div>
-        <div class="rec-score-badge">⭐ ${score}</div>
+        <div class="rec-score-badge">⭐ ${scoreText(r)}</div>
         <span style="font-size:64px">🏢</span>
         <button class="rec-heart-btn" data-id="${idx}" onclick="toggleFav(this); event.stopPropagation();" aria-label="찜">🤍</button>
       </div>
@@ -539,7 +594,7 @@ function renderRestCard(r, i) {
     <div class="rec-card" onclick="openPropertyModal(${idx})">
       <div class="rec-card-image ${color}">
         <div class="rec-rank-badge">${rank}위</div>
-        <div class="rec-score-badge">⭐ ${score}</div>
+        <div class="rec-score-badge">⭐ ${scoreText(r)}</div>
         <span>🏠</span>
         <button class="rec-heart-btn" data-id="${idx}" onclick="toggleFav(this); event.stopPropagation();" aria-label="찜">🤍</button>
       </div>
@@ -547,7 +602,7 @@ function renderRestCard(r, i) {
         <div class="rec-card-rank">${rank}위 추천</div>
         <div class="rec-card-addr">${escHtml(r.address || (r.gu + " " + r.dong))}</div>
         <div class="rec-card-price">${priceLine}</div>
-        <div class="rec-card-info">${commuteIcon(r)} 통근 ${commute}분 · 🏪 인프라 ${r.infra_score || 0}점 · ⭐ ${score}점</div>
+        <div class="rec-card-info">${commuteIcon(r)} 통근 ${commute}분 · 🏪 인프라 ${r.infra_score || 0}점 · ⭐ ${scoreText(r)}점</div>
         ${policyBadge}
       </div>
     </div>
@@ -595,6 +650,12 @@ function formatPriceLineCompact(r) {
   return formatManwon(r.deposit_manwon || r.price_manwon);
 }
 
+// 종합 점수 표시 — 정수로 반올림하면 1~3위가 모두 같은 점수로 보여 소수점 1자리
+function scoreText(r) {
+  const v = r.score_precise ?? r.score ?? 0;
+  return Number(v).toFixed(1);
+}
+
 function commuteIcon(r) {
   return (r && (r.transport_mode || _transportMode)) === "car" ? "🚗" : "🚇";
 }
@@ -617,26 +678,23 @@ function _favRaw(r) {
   return `${(r.address || '').trim()}|${r.area_m2 || 0}|${r.deposit_manwon || 0}|${r.monthly_rent_manwon || 0}`;
 }
 
+// 카드 하트 클릭
 async function toggleFav(btn) {
   if (!btn) return;
+  const r = sortedResults()[parseInt(btn.dataset.id || '0')];
+  if (!r) return;
+  btn.disabled = true;
+  btn.textContent = _favKeySet[_favRaw(r)] ? '🤍' : '❤️';   // 낙관적 표시
+  try { await toggleFavForResult(r); } finally { btn.disabled = false; syncHeartButtons(); }
+}
 
+// 매물 하나 찜 토글 (카드·모달 공용) + 토스트 (해제는 되돌리기 가능). 성공 시 찜 여부 반환.
+async function toggleFavForResult(r, { quiet = false } = {}) {
   const userId = parseInt(localStorage.getItem('user_id') || '0');
   if (!userId) {
     alert('로그인이 필요해요.');
-    return;
+    return null;
   }
-
-  const idx = parseInt(btn.dataset.id || '0');
-  const results = sortedResults();
-  const r = results[idx];
-  if (!r) return;
-
-  const isFilled = btn.textContent.trim() === '❤️';
-
-  // 낙관적 UI 업데이트
-  btn.textContent = isFilled ? '🤍' : '❤️';
-  btn.disabled = true;
-
   try {
     const res = await fetch((window.API_BASE || "") + `/favorites/toggle?user_id=${userId}`, {
       method: 'POST',
@@ -680,14 +738,24 @@ async function toggleFav(btn) {
       delete _favKeySet[raw];
     }
     syncHeartButtons();
+    if (!quiet) {
+      if (data.action === 'added') showToast('❤️ 찜 목록에 담았어요');
+      else showToast('찜을 해제했어요', { actionLabel: '되돌리기', onAction: () => toggleFavForResult(r, { quiet: true }) });
+    }
+    return data.action === 'added';
   } catch (e) {
-    // 실패 시 원래대로 되돌리기
-    btn.textContent = isFilled ? '❤️' : '🤍';
     console.error('찜 토글 실패:', e);
-  } finally {
-    btn.disabled = false;
+    showToast('찜 처리에 실패했어요. 잠시 후 다시 시도해 주세요.');
+    syncHeartButtons();
+    return null;
   }
 }
+
+// 매물 모달의 찜 버튼 (property-modal.js 가 사용)
+window.__modalFav = {
+  isFav: (r) => !!_favKeySet[_favRaw(r)],
+  toggle: (r) => toggleFavForResult(r),
+};
 
 async function loadFavKeys() {
   const userId = parseInt(localStorage.getItem('user_id') || '0');
@@ -709,6 +777,7 @@ async function loadFavKeys() {
 }
 
 function syncHeartButtons() {
+  if (typeof window.__repaintModalFav === "function") window.__repaintModalFav();
   const results = sortedResults();
   document.querySelectorAll('.rec-heart-btn').forEach(btn => {
     const idx = parseInt(btn.dataset.id || '0');

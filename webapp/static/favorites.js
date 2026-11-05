@@ -83,6 +83,7 @@
           workplace_lat:        snap.workplace_lat,
           workplace_lon:        snap.workplace_lon,
           transport_mode:       snap.transport_mode || null,
+          _snapshot:            snap,          // 되돌리기(재찜) 시 원래 스냅샷 그대로 복원
         };
       });
 
@@ -164,6 +165,7 @@
           "Authorization": "Bearer " + token,
         },
         body: JSON.stringify({
+          ...(f._snapshot || {}),
           address:             f.address || "",
           gu:                  f.gu || "",
           dong:                f.dong || "",
@@ -182,10 +184,12 @@
       if (!res.ok) throw new Error(data.detail || "토글 실패");
 
       // 목록에서 제거 (removed 든 added 든 새로 fetch 가 정답이지만, 비용 절감 위해 클라이언트 갱신)
-      _items.splice(idx, 1);
+      const removed = _items.splice(idx, 1)[0];
       window.__modalResultsProvider = () => _items;
       renderList();
       updateBadge();
+      // 실수로 누른 경우를 위해 되돌리기 제공
+      showToast("찜을 해제했어요", { actionLabel: "되돌리기", onAction: () => restoreFavorite(removed) });
     } catch (e) {
       console.error(e);
       btn.textContent = "❤️";
@@ -194,6 +198,35 @@
     }
   }
   window.toggleHeart = toggleHeart;
+
+  // 되돌리기 — 같은 스냅샷으로 다시 찜 → 목록 새로 불러오기
+  async function restoreFavorite(f) {
+    try {
+      const res = await fetch((window.API_BASE || "") + `/favorites/toggle?user_id=${userId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+        body: JSON.stringify({ ...(f._snapshot || {}), address: f.address || "", gu: f.gu || "", dong: f.dong || "",
+          house_type: f.house_type || "", rent_type: f.rent_type || "", area_m2: Number(f.area_m2 || 0),
+          deposit_manwon: f.deposit_manwon || 0, monthly_rent_manwon: f.monthly_rent_manwon || 0,
+          commute_min: f.commute_min || 0, score: f.score || 0, lat: f.lat || 0, lon: f.lon || 0 }),
+      });
+      if (!res.ok) throw new Error();
+      await loadFavorites();
+      showToast("❤️ 다시 찜했어요");
+    } catch {
+      showToast("되돌리지 못했어요. 추천 결과에서 다시 찜해 주세요.");
+    }
+  }
+
+  // 매물 모달의 찜 버튼 — 찜 목록에선 '찜함' 상태, 누르면 해제(되돌리기 가능) 후 모달 닫기
+  window.__modalFav = {
+    isFav: () => true,
+    toggle: async (r, idx) => {
+      const btn = document.querySelector(`.fav-heart[data-idx="${idx}"]`);
+      closePropertyModal();
+      await toggleHeart(idx, btn || document.createElement("button"));
+    },
+  };
 
   function updateBadge() {
     const badge = document.getElementById("sidebar-fav-badge");

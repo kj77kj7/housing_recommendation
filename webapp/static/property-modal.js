@@ -58,11 +58,42 @@ function openPropertyModal(idx) {
   _modalCurrentRank = idx;
   _modalShownCount = 5;
   renderModalContent(r, idx);
+  syncModalFavButton(r, idx);
   const overlay = document.getElementById("property-modal-overlay");
   overlay.style.display = "flex";
   overlay.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
   renderModalExpense(r, idx);
+}
+
+// ── 모달 찜 버튼 ─────────────────────────────────────────
+// 페이지가 window.__modalFav = { isFav(r), toggle(r, idx) → Promise } 를 등록하면 표시
+// (예전엔 찜을 카드에서만 할 수 있었음)
+function syncModalFavButton(r, idx) {
+  const header = document.querySelector("#property-modal-overlay .modal-header");
+  if (!header) return;
+  let btn = document.getElementById("modal-fav-btn");
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "modal-fav-btn";
+    btn.className = "modal-fav-btn";
+    header.insertBefore(btn, document.getElementById("modal-close-btn"));
+  }
+  const api = window.__modalFav;
+  if (!api) { btn.style.display = "none"; return; }
+  btn.style.display = "";
+  const paint = () => {
+    const on = api.isFav(r);
+    btn.textContent = on ? "❤️ 찜함" : "🤍 찜하기";
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  paint();
+  window.__repaintModalFav = paint;   // 다른 곳(카드 하트·되돌리기)에서 찜 상태가 바뀌면 다시 그림
+  btn.onclick = async () => {
+    btn.disabled = true;
+    try { await api.toggle(r, idx); } finally { btn.disabled = false; paint(); }
+  };
 }
 
 function closePropertyModal() {
@@ -98,7 +129,7 @@ function renderModalContent(r, idx) {
 
   // 우측 태그 칩
   const tagsEl = document.getElementById("modal-tags");
-  const score = r.score != null ? r.score : 0;
+  const score = Number(r.score_precise ?? r.score ?? 0).toFixed(1);
   const policyTotal = (r.applicable_policies_total != null
                        ? r.applicable_policies_total
                        : (r.applicable_policies ? r.applicable_policies.length : 0));
@@ -195,7 +226,7 @@ function renderReceipt(target) {
         <span class="receipt-line-value">${fmt(target.rent)}</span>
       </div>
       <div class="receipt-line">
-        <span class="receipt-line-label">관리비 (추정)</span>
+        <span class="receipt-line-label">관리비 (평균 추정 · 면적 무관)</span>
         <span class="receipt-line-value">${fmt(target.maintenance)}</span>
       </div>
     </div>
@@ -239,8 +270,8 @@ function renderReceipt(target) {
     </div>
 
     <div class="receipt-footnote">
-      <div>※ 청년 1인가구 평균 213만원</div>
-      <div class="receipt-footnote-sub">(출처: 청년의 삶 실태조사)</div>
+      <div>※ 참고: 전국 청년 1인가구 월평균 생활비 213만원</div>
+      <div class="receipt-footnote-sub">(출처: 청년의 삶 실태조사 · 아래 '서울 평균'은 서울 매물 월세 평균으로 같은 방식으로 계산한 값이에요)</div>
     </div>
   `;
 }
@@ -254,7 +285,7 @@ function renderComparisonCard(target, neighbors, seoulAvg, meta) {
   const rows = [
     { gu: target.gu,  total: target.total,  isTarget: true,  isAvg: false },
     ...neighbors.map(n => ({ gu: n.gu, total: n.total, isTarget: false, isAvg: false })),
-    { gu: "서울 평균", total: seoulAvg.total, isTarget: false, isAvg: true },
+    { gu: "서울 평균 (월세 평균 기준)", total: seoulAvg.total, isTarget: false, isAvg: true },
   ];
 
   const MAX_BAR = 130;  // 130%까지가 막대 max (overflow 방지)

@@ -235,6 +235,31 @@ class ChatBot:
         # (address) -> (ok: bool, error_msg: str). None 이면 형식 검사만 수행.
         self.address_validator = None
 
+    # ── 상태 저장/복원 (세션 DB 저장용) ─────────────────────
+    # 서버 메모리에만 두면 재배포·재시작 때 대화가 사라지므로 JSON 으로 직렬화해 DB 에 저장한다.
+    _STATE_SKIP = {"address_validator", "_recommendation_lock", "_recommendation_result",
+                   "_recommendation_status", "_recommendation_error", "_recommendation_error_payload",
+                   "_recommendation_params_key"}
+
+    def to_state(self) -> Dict[str, Any]:
+        state = {}
+        for k, v in self.__dict__.items():
+            if k in self._STATE_SKIP or callable(v):
+                continue
+            state[k] = {"__set__": sorted(v)} if isinstance(v, set) else v
+        return state
+
+    @classmethod
+    def from_state(cls, state: Dict[str, Any]) -> "ChatBot":
+        bot = cls()
+        for k, v in (state or {}).items():
+            if k in cls._STATE_SKIP:
+                continue
+            if isinstance(v, dict) and set(v) == {"__set__"}:
+                v = set(v["__set__"])
+            setattr(bot, k, v)
+        return bot
+
     # ── 질문 문구 (임대유형에 따라 달라지는 질문 처리) ──────────
 
     def _slot_question(self, slot: str) -> str:
@@ -1041,6 +1066,11 @@ class ChatBot:
             return self._undo_last_slot()
         if _t == "__CANCEL_EDIT_ACTIVE__":
             return self._cancel_active_edit()
+        if _t == "__SUMMARY__":
+            # 마이페이지 '조건 다시 설정하기' — 이전 조건 요약을 다시 보여줌 (수정 메뉴로 이어짐)
+            if self._done:
+                return self._build_summary(), True, self.get_v5_params()
+            return (self._next_question() or "이어서 조건을 알려주세요."), False, None
         if _t.startswith("__EDIT:") and _t.endswith("__"):
             return self._edit_slot(_t[7:-2])
 
@@ -1221,7 +1251,11 @@ class ChatBot:
             if pol is not None:
                 new_slots["use_youth_policy"] = pol
 
+        had_address = self.slots.get("work_address")
         self._merge_slots(new_slots)
+        # 직장 주소를 새로 받았으면 어떻게 이해했는지 한 줄 알려줌 (잘못 인식됐을 때 바로 '이전으로' 할 수 있게)
+        address_ack = (f"📍 '{self.slots['work_address']}'(으)로 확인했어요.\n\n"
+                       if not had_address and self.slots.get("work_address") else "")
 
         # 주소 검증 실패 시 다른 슬롯은 저장하되 work_address만 다시 묻기
         # (사용자 발화에서 LLM이 추출한 transport_mode·house_type 등을 보존해 UX 개선)
@@ -1231,7 +1265,7 @@ class ChatBot:
         # 다음 질문 (v6.0 — 카드 단계 제거됨)
         next_q = self._next_question()
         if next_q is not None:
-            return next_q, False, None
+            return address_ack + next_q, False, None
 
         if not self._is_slots_complete():
             miss = self._missing_required()

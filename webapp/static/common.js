@@ -59,3 +59,33 @@ document.addEventListener("DOMContentLoaded", () => {
   sidebar.addEventListener("click", (e) => { if (e.target.closest("a")) setOpen(false); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") setOpen(false); });
 });
+
+// ── 토스트 알림 ──────────────────────────────────────────
+// showToast("찜을 해제했어요", { actionLabel: "되돌리기", onAction: () => … })
+function showToast(message, opts = {}) {
+  let root = document.getElementById("toast-root");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "toast-root";
+    root.setAttribute("aria-live", "polite");
+    document.body.appendChild(root);
+  }
+  const el = document.createElement("div");
+  el.className = "toast";
+  const text = document.createElement("span");
+  text.textContent = message;
+  el.appendChild(text);
+  let timer = null;
+  const close = () => { clearTimeout(timer); el.classList.remove("toast--show"); setTimeout(() => el.remove(), 250); };
+  if (opts.actionLabel && typeof opts.onAction === "function") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-action";
+    btn.textContent = opts.actionLabel;
+    btn.addEventListener("click", () => { close(); opts.onAction(); });
+    el.appendChild(btn);
+  }
+  root.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("toast--show"));
+  timer = setTimeout(close, opts.duration || 4000);
+}

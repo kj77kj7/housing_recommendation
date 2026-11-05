@@ -3,6 +3,9 @@ import re
 import time
 import math
 import datetime
+import threading
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -55,7 +58,114 @@ if _missing_keys:
 REQUEST_TIMEOUT       = 20
 KAKAO_TIMEOUT_SEC     = 10   # 카카오 API 단일 호출 타임아웃 (초)
 KAKAO_RETRY_ATTEMPTS  = 3    # 최대 시도 횟수 (첫 시도 + 재시도 2회)
-SLEEP_BETWEEN_CALLS   = 0.5
+SLEEP_BETWEEN_CALLS   = 0.0   # (구) 호출마다 고정 대기 — 이제 _throttle 의 API별 초당 한도로 대체
+
+# ── 추천 속도: 병렬 실행 + API별 초당 호출 한도 + 결과 캐시 ─────────────
+# 예전엔 모든 외부 호출을 순서대로 하면서 호출마다 0.5초씩 쉬어 추천 1회에 4~7분 걸렸다.
+# 이제 여러 호출을 동시에 보내되, API 마다 초당 호출 수를 넘지 않게 조절한다 (환경변수로 조정 가능).
+API_WORKERS = int(os.getenv("API_WORKERS", "6"))          # 동시 호출 스레드 수
+_API_RPS = {                                               # API별 초당 최대 호출 수
+    "kakao": float(os.getenv("KAKAO_RPS", "15")),
+    "odsay": float(os.getenv("ODSAY_RPS", "5")),
+    "molit": float(os.getenv("MOLIT_RPS", "8")),
+}
+_throttle_lock = threading.Lock()
+_throttle_next: Dict[str, float] = {}
+
+
+def _throttle(kind: str) -> None:
+    """kind API 의 초당 호출 한도를 지키도록 필요한 만큼만 대기 (스레드 안전)."""
+    rps = _API_RPS.get(kind, 0)
+    if rps <= 0:
+        return
+    interval = 1.0 / rps
+    with _throttle_lock:
+        now = time.monotonic()
+        slot = max(now, _throttle_next.get(kind, 0.0))
+        _throttle_next[kind] = slot + interval
+    wait = slot - now
+    if wait > 0:
+        time.sleep(wait)
+
+
+class _TTLCache:
+    """스레드 안전 TTL 캐시 + 같은 키 동시 요청은 1번만 계산 (single-flight)."""
+
+    def __init__(self, ttl: float, maxsize: int):
+        self.ttl, self.maxsize = ttl, maxsize
+        self._data: Dict[Any, Tuple[float, Any]] = {}
+        self._lock = threading.Lock()
+        self._key_locks: Dict[Any, threading.Lock] = {}
+
+    def get(self, key):
+        with self._lock:
+            hit = self._data.get(key)
+            if hit and hit[0] > time.monotonic():
+                return True, hit[1]
+        return False, None
+
+    def set(self, key, value, ttl: Optional[float] = None):
+        with self._lock:
+            if len(self._data) >= self.maxsize:
+                # 만료된 것부터, 그래도 많으면 오래된 절반 정리
+                now = time.monotonic()
+                for k in [k for k, (exp, _) in self._data.items() if exp <= now]:
+                    del self._data[k]
+                if len(self._data) >= self.maxsize:
+                    for k in list(self._data)[: self.maxsize // 2]:
+                        del self._data[k]
+            self._data[key] = (time.monotonic() + (self.ttl if ttl is None else ttl), value)
+
+    def get_or_compute(self, key, fn, ttl_fn=None):
+        ok, val = self.get(key)
+        if ok:
+            return val
+        with self._lock:
+            klock = self._key_locks.setdefault(key, threading.Lock())
+        with klock:
+            ok, val = self.get(key)
+            if ok:
+                return val
+            val = fn()
+            self.set(key, val, ttl_fn(val) if ttl_fn else None)
+            return val
+
+
+_GEOCODE_CACHE = _TTLCache(ttl=7 * 24 * 3600, maxsize=50000)   # 주소 → 좌표 (주소 좌표는 거의 안 바뀜)
+_MOLIT_CACHE   = _TTLCache(ttl=6 * 3600, maxsize=3000)         # (API, 구, 연월) → 실거래 목록
+_INFRA_CACHE   = _TTLCache(ttl=24 * 3600, maxsize=100000)      # (좌표, 시설종류) → 최근접 거리
+
+
+def _pmap(fn, items, workers: Optional[int] = None, on_done=None) -> list:
+    """items 를 병렬로 fn 처리, 입력 순서대로 결과 반환. on_done(완료수, 전체수) 진행 콜백.
+
+    contextvars 를 복사해 넘겨 호출 스레드의 로그 캡처(webapp 의 추천 로그)가 작업 스레드에도 적용되게 한다.
+    """
+    items = list(items)
+    if not items:
+        return []
+    workers = max(1, min(workers or API_WORKERS, len(items)))
+    results = [None] * len(items)
+    done = [0]
+    done_lock = threading.Lock()
+
+    def _run(i, item):
+        results[i] = fn(item)
+        if on_done:
+            with done_lock:
+                done[0] += 1
+                n = done[0]
+            on_done(n, len(items))
+
+    if workers == 1:
+        for i, it in enumerate(items):
+            _run(i, it)
+        return results
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(contextvars.copy_context().run, _run, i, it) for i, it in enumerate(items)]
+        for f in futs:
+            f.result()   # 작업 중 예외는 그대로 올림
+    return results
 ODSAY_RETRY_COUNT     = 2
 ODSAY_RETRY_SLEEP_SEC = 0.7
 
@@ -218,7 +328,11 @@ def _kakao_request(tag: str, url: str, headers: dict, params: dict) -> requests.
     last_exc: Exception = RuntimeError("알 수 없는 오류")
     for attempt in range(1, KAKAO_RETRY_ATTEMPTS + 1):
         try:
+            _throttle("kakao")
             resp = requests.get(url, headers=headers, params=params, timeout=KAKAO_TIMEOUT_SEC)
+            # 429(호출 한도 초과)는 잠시 후 재시도 — 병렬 호출로 순간 한도를 넘을 수 있음
+            if resp.status_code == 429:
+                raise APIError(f"[{tag}] 호출 한도 초과 HTTP 429")
             if resp.status_code >= 500:
                 raise APIError(f"[{tag}] 서버 오류 HTTP {resp.status_code}: {truncate_text(resp.text)}")
             return resp  # 2xx or 4xx → 즉시 반환 (재시도 불필요)
@@ -300,6 +414,24 @@ def clean_work_address(addr: str) -> str:
 
 
 def geocode_address_kakao(address, kakao_local_key):
+    """주소 → (x, y, 매칭주소). 결과는 캐시 (같은 동·지번은 여러 사용자가 반복 조회함).
+    '주소 없음'은 짧게(1시간) 캐시하고, 네트워크 오류는 캐시하지 않는다."""
+    ok, hit = _GEOCODE_CACHE.get(address)
+    if ok:
+        if hit is None:
+            raise APIError(f"[Kakao Local] 주소 변환 실패: {address}")
+        return hit
+    try:
+        res = _geocode_address_kakao_uncached(address, kakao_local_key)
+    except APIError as e:
+        if "주소 변환 실패" in str(e):
+            _GEOCODE_CACHE.set(address, None, ttl=3600)
+        raise
+    _GEOCODE_CACHE.set(address, res)
+    return res
+
+
+def _geocode_address_kakao_uncached(address, kakao_local_key):
     require_key("KAKAO_LOCAL_REST_API_KEY", kakao_local_key)
     resp = _kakao_request(
         "Kakao Local",
@@ -453,6 +585,7 @@ def parse_odsay_error(data, status_code, raw):
 
 def get_transit_route_odsay_once(ox, oy, dx, dy, api_key):
     require_key("ODSAY_API_KEY", api_key)
+    _throttle("odsay")
     resp     = requests.get(
         "https://api.odsay.com/v1/api/searchPubTransPathT",
         params={"apiKey": api_key, "SX": ox, "SY": oy, "EX": dx, "EY": dy,
@@ -508,6 +641,7 @@ def get_transit_route_odsay(ox, oy, dx, dy, api_key):
 # =========================================================
 def _molit_fetch_raw(url, lawd_cd, deal_ymd):
     try:
+        _throttle("molit")
         resp = requests.get(url, params={
             "serviceKey": MOLIT_API_KEY,
             "LAWD_CD":    lawd_cd,
@@ -579,6 +713,16 @@ def _dong_match(dong_name: str, api_dong: str) -> bool:
     return False
 
 
+def _molit_fetch_cached(url, lawd_cd, deal_ymd):
+    """국토부 응답은 구(lawd_cd)·연월 단위 — 같은 구의 여러 동, 여러 사용자가 재사용.
+    빈 응답(오류일 수도 있음)은 5분만 캐시."""
+    return _MOLIT_CACHE.get_or_compute(
+        (url, lawd_cd, deal_ymd),
+        lambda: _molit_fetch_raw(url, lawd_cd, deal_ymd),
+        ttl_fn=lambda items: None if items else 300,
+    )
+
+
 def fetch_molit_rentals(gu_name, dong_name, n_months=MOLIT_RECENT_MONTHS,
                         housing_types=None):
     if housing_types is None: housing_types = ["연립다세대","오피스텔"]
@@ -594,7 +738,7 @@ def fetch_molit_rentals(gu_name, dong_name, n_months=MOLIT_RECENT_MONTHS,
         if not url: continue
         for i in range(n_months):
             ym    = (now - datetime.timedelta(days=30*i)).strftime("%Y%m")
-            items = _molit_fetch_raw(url, lawd_cd, ym)
+            items = _molit_fetch_cached(url, lawd_cd, ym)
             for it in items:
                 if not isinstance(it, dict): continue
                 # 실제 XML 영문 필드명 (오피스텔/연립다세대 공통)
@@ -626,7 +770,6 @@ def fetch_molit_rentals(gu_name, dong_name, n_months=MOLIT_RECENT_MONTHS,
                     "deal_ym":             ym,
                     "geocode_addr":        f"서울특별시 {gu_name} {dong} {jibun}".strip(),
                 })
-            time.sleep(SLEEP_BETWEEN_CALLS)
 
     if not all_rows: return pd.DataFrame()
     df = pd.DataFrame(all_rows)
@@ -637,7 +780,12 @@ def fetch_molit_rentals(gu_name, dong_name, n_months=MOLIT_RECENT_MONTHS,
 
 
 def stage2_geocode_and_filter(molit_df, budget_manwon, kakao_local_key,
-                               rent_type: str = "", monthly_rent_manwon: float = 0.0):
+                               rent_type: str = "", monthly_rent_manwon: float = 0.0,
+                               limit: Optional[int] = None):
+    """예산·임대유형 필터 후 매물 주소 좌표 변환.
+
+    limit 지정 시: 이후 단계가 '주소 오름차순 상위 limit 개'만 쓰므로, 그 순서대로 좌표를 구하다가
+    성공 limit 개를 채우면 멈춘다 (예전엔 동의 모든 거래 주소를 변환한 뒤 10개만 사용)."""
     if molit_df.empty: return molit_df
     # 계약 유형 필터 (월세/전세 구분)
     if rent_type in ("월세", "전세") and "rent_type" in molit_df.columns:
@@ -652,14 +800,28 @@ def stage2_geocode_and_filter(molit_df, budget_manwon, kakao_local_key,
         molit_df = molit_df[molit_df["conv_deposit_manwon"] <= budget_manwon].copy()
     if molit_df.empty: return molit_df
     unique_addrs = molit_df["geocode_addr"].drop_duplicates().tolist()
-    addr_coord = {}
-    for addr in unique_addrs:
+
+    def _geo(addr):
         try:
-            x, y, matched = geocode_address_kakao(addr, kakao_local_key)
-            addr_coord[addr] = (x, y, matched)
-        except:
-            addr_coord[addr] = (None, None, None)
-        time.sleep(SLEEP_BETWEEN_CALLS)
+            return geocode_address_kakao(addr, kakao_local_key)
+        except Exception:
+            return (None, None, None)
+
+    addr_coord = {}
+    if limit:
+        # 이후 groupby("geocode_addr") 가 주소 오름차순이므로 같은 순서로 필요한 만큼만
+        pending = sorted(unique_addrs)
+        ok_count = 0
+        while pending and ok_count < limit:
+            batch, pending = pending[: max(limit - ok_count, 1)], pending[max(limit - ok_count, 1):]
+            for addr, coord in zip(batch, _pmap(_geo, batch)):
+                addr_coord[addr] = coord
+                if coord[0] is not None:
+                    ok_count += 1
+        molit_df = molit_df[molit_df["geocode_addr"].isin(addr_coord)]
+    else:
+        for addr, coord in zip(unique_addrs, _pmap(_geo, unique_addrs)):
+            addr_coord[addr] = coord
     molit_df = molit_df.copy()
     molit_df["cand_x"]          = molit_df["geocode_addr"].map(lambda a: addr_coord.get(a,(None,None,None))[0])
     molit_df["cand_y"]          = molit_df["geocode_addr"].map(lambda a: addr_coord.get(a,(None,None,None))[1])
@@ -671,7 +833,22 @@ def stage2_geocode_and_filter(molit_df, budget_manwon, kakao_local_key,
 # =========================================================
 # 11. 주거비 CSV 로드
 # =========================================================
+_HOUSING_CACHE: Dict[Any, pd.DataFrame] = {}
+_HOUSING_LOCK = threading.Lock()
+
+
 def load_housing_data(csv_path):
+    """주거비 CSV (54만 행). 예전엔 추천마다 새로 읽어 수 초 + 수백 MB 를 매번 썼다.
+    파일 경로·수정시각이 같으면 메모리의 DataFrame 을 재사용한다 (호출하는 쪽은 읽기 전용으로 사용)."""
+    key = (os.path.abspath(csv_path), os.path.getmtime(csv_path) if os.path.exists(csv_path) else None)
+    with _HOUSING_LOCK:
+        if key not in _HOUSING_CACHE:
+            _HOUSING_CACHE.clear()
+            _HOUSING_CACHE[key] = _load_housing_data_uncached(csv_path)
+        return _HOUSING_CACHE[key]
+
+
+def _load_housing_data_uncached(csv_path):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"주거비 CSV 없음: {csv_path}")
     # gz 파일은 pandas가 자동 압축 해제 — encoding만 지정
@@ -827,7 +1004,8 @@ def stage2_filter_dong(df: pd.DataFrame,
                         depart_hour: int,
                         weight_commute: float,
                         weight_housing: float,
-                        kakao_local_key: str) -> pd.DataFrame:
+                        kakao_local_key: str,
+                        progress_cb=None) -> pd.DataFrame:
 
     # 선정된 구 목록
     gu_list = selected_gu["시군구_2"].tolist()
@@ -864,15 +1042,16 @@ def stage2_filter_dong(df: pd.DataFrame,
     work["candidate_address"] = "서울특별시 " + work["시군구_2"] + " " + work["읍면동"]
     dong_agg = work.copy()
 
-    # 동 중심 좌표 지오코딩 (카카오)
-    coords = {}
-    for addr in dong_agg["candidate_address"].tolist():
+    # 동 중심 좌표 지오코딩 (카카오) — 병렬 + 캐시
+    def _dong_geo(addr):
         try:
             x, y, _ = geocode_address_kakao(addr, kakao_local_key)
-            coords[addr] = (x, y)
-        except:
-            coords[addr] = (None, None)
-        time.sleep(SLEEP_BETWEEN_CALLS)
+            return (x, y)
+        except Exception:
+            return (None, None)
+
+    addrs = dong_agg["candidate_address"].tolist()
+    coords = dict(zip(addrs, _pmap(_dong_geo, addrs, on_done=progress_cb)))
 
     dong_agg["dong_x"] = dong_agg["candidate_address"].map(lambda a: coords.get(a,(None,None))[0])
     dong_agg["dong_y"] = dong_agg["candidate_address"].map(lambda a: coords.get(a,(None,None))[1])
@@ -1103,8 +1282,17 @@ INFRA_DISTANCE_SCORE = [
 def _get_nearest_infra_distance(x, y, category_code, kakao_key, radius=1000):
     """
     카카오 Local 카테고리 검색으로 반경 내 가장 가까운 시설 거리(m) 반환.
-    없으면 None 반환.
+    없으면 None 반환. 같은 위치(약 10m 단위)·시설 종류는 캐시 재사용.
     """
+    key = (round(float(x), 4), round(float(y), 4), category_code, radius)
+    return _INFRA_CACHE.get_or_compute(
+        key,
+        lambda: _get_nearest_infra_distance_uncached(x, y, category_code, kakao_key, radius),
+        ttl_fn=lambda d: None if d is not None else 600,
+    )
+
+
+def _get_nearest_infra_distance_uncached(x, y, category_code, kakao_key, radius=1000):
     try:
         resp = _kakao_request(
             "Kakao Infra",
@@ -1171,7 +1359,6 @@ def calc_infra_score(x, y, required_infra, kakao_key, vibe_weights=None):
         detail[name] = (dist, score)
         if score == 0:          # 1km 초과 또는 없음
             fail.append(name)
-        time.sleep(SLEEP_BETWEEN_CALLS)
 
     if vibe_weights:
         raw_scores = {name: s for name, (_, s) in detail.items()}
@@ -1558,10 +1745,24 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
                         monthly_rent_manwon=50.0,
                         chatbot_mode=False,
                         vibe_list=None,
-                        selected_policies=None):
+                        selected_policies=None,
+                        progress_cb=None):
+    """progress_cb(percent: int, message: str) — 단계별 진행률 (웹 진행 표시용, 선택)."""
+
+    def _progress(pct, msg):
+        if progress_cb:
+            try:
+                progress_cb(int(max(0, min(100, pct))), msg)
+            except Exception:
+                pass
+
+    def _span(lo, hi, msg):
+        """완료수/전체수 → lo~hi 구간 진행률 콜백"""
+        return lambda done, total: _progress(lo + (hi - lo) * done / max(total, 1), f"{msg} ({done}/{total})")
 
     if transport_mode not in ("car","transit"):
         raise ValueError("이동수단은 'car' 또는 'transit'")
+    _progress(2, "직장 위치를 확인하고 있어요")
 
     # 정책 캐시 초기화 (새 추천 시작)
     reset_policy_cache()
@@ -1573,6 +1774,7 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
         print(f"  [주소 정제] {work_address} → {work_address_clean}")
     work_x, work_y, _ = geocode_address_kakao_with_fallback(work_address, KAKAO_LOCAL_REST_API_KEY)
 
+    _progress(5, "서울 주거비 데이터를 불러오고 있어요")
     housing_df        = load_housing_data(housing_csv_path)
     seoul_avg         = calc_seoul_rent_average(housing_df)
     global_mean_price = float(housing_df["㎡당환산보증금_재계산(만원)"].mean())
@@ -1585,6 +1787,7 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
     # API 호출 없음, 순수 CSV 연산
     # ══════════════════════════════════════════════════════
     print(f"\n[1단계] 구 단위 필터링 중...")
+    _progress(8, "예산에 맞는 구를 고르고 있어요")
     selected_gu = stage1_filter_gu(
         housing_df, budget_manwon, region_filter, work_x, work_y
     )
@@ -1604,6 +1807,7 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
         allowed_commute_min, transport_mode, depart_hour,
         weight_commute, weight_housing,
         KAKAO_LOCAL_REST_API_KEY,
+        progress_cb=_span(10, 22, "후보 동네 위치를 확인하고 있어요"),
     )
 
     if selected_dong.empty:
@@ -1618,9 +1822,11 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
     # → 정밀 통근시간(혼잡계수 포함) → CV·베이즈·신뢰도 → 최종 점수
     # ══════════════════════════════════════════════════════
     print(f"\n[3단계] 실거래 매물 조회 및 정밀 통근시간 계산 중...")
+    _progress(22, "동네별 실거래 매물을 찾고 있어요")
     stage3_all = []
 
-    for _, dong_row in selected_dong.iterrows():
+    # 3-1) 동별 실거래 조회 + 좌표 변환 — 동끼리 병렬 (같은 구 응답은 캐시 공유)
+    def _prepare_dong(dong_row):
         gu_name   = str(dong_row["시군구_2"]).strip()
         dong_name = str(dong_row["읍면동"]).strip()
 
@@ -1629,21 +1835,22 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
                                         housing_types=htypes)
         if molit_df.empty:
             print(f"  [{gu_name} {dong_name}] 국토부 API 매물 없음")
-            continue
+            return None
 
         rent_type_for_filter = "월세" if monthly_rent_manwon > 0 else "전세"
         molit_geo = stage2_geocode_and_filter(
             molit_df, budget_manwon, KAKAO_LOCAL_REST_API_KEY,
             rent_type=rent_type_for_filter,
             monthly_rent_manwon=monthly_rent_manwon,
+            limit=STAGE3_MAX_PROPERTY_PER_DONG,
         )
         if molit_geo.empty or "geocode_ok" not in molit_geo.columns:
             print(f"  [{gu_name} {dong_name}] 지오코딩 결과 없음 (예산 필터 또는 빈 응답)")
-            continue
+            return None
         ok_molit  = molit_geo[molit_geo["geocode_ok"]==True].copy()
         if ok_molit.empty:
             print(f"  [{gu_name} {dong_name}] 지오코딩 성공 매물 없음 (전체 {len(molit_geo)}건)")
-            continue
+            return None
 
         # 동일 지번 → 최저가 대표 매물 (API 호출 절감)
         if "geocode_addr" in ok_molit.columns:
@@ -1659,58 +1866,73 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
 
         # 베이즈 평활화
         ok_molit = apply_bayesian_smoothing(ok_molit, global_mean_price, global_mean_dep)
+        return gu_name, dong_name, dong_confidence, ok_molit
 
-        for _, mrow in ok_molit.iterrows():
-            base = mrow.to_dict()
-            base["data_source"]     = "국토부API"
-            base["시군구_2"]         = gu_name
-            base["읍면동"]           = dong_name
-            base["data_confidence"]  = dong_confidence
-            base["display_address"]  = (
-                f"서울특별시 {gu_name} {mrow.get('dong', dong_name)} {mrow.get('jibun','')}"
-                + (f" {mrow.get('building_name','')}" if mrow.get("building_name") else "")
-            ).strip()
+    dong_rows = [r for _, r in selected_dong.iterrows()]
+    prepared = [x for x in _pmap(_prepare_dong, dong_rows, workers=min(API_WORKERS, 4),
+                                 on_done=_span(22, 50, "동네별 실거래 매물을 찾고 있어요")) if x]
 
-            # 가격 적정성 정보 추가
-            price_ctx = calc_price_context(mrow.to_dict(), ok_molit)
-            base.update({
-                "deal_recency":       price_ctx.get("deal_recency",""),
-                "vs_dong_median":     price_ctx.get("vs_dong_median",""),
-                "similar_area_range": price_ctx.get("similar_area_range",""),
-            })
+    # 3-2) 매물별 인프라·정밀 통근시간 — 매물끼리 병렬
+    jobs = [(gu_name, dong_name, dong_confidence, ok_molit, mrow)
+            for gu_name, dong_name, dong_confidence, ok_molit in prepared
+            for _, mrow in ok_molit.iterrows()]
+    _progress(50, f"매물 {len(jobs)}곳의 통근 시간을 계산하고 있어요")
 
-            # 생활 인프라 점수 계산 — vibe 가 설정되면 무조건 7개 인프라 점수 산출.
-            # (이전엔 required_infra(가중치≥1.3) 가 None 이면 계산을 아예 스킵해서,
-            #  vibe 다중선택 시 평균화로 임계값 미달 → 모든 매물 infra_score=0 표시되던 버그)
-            # 1km 초과 필터(infra_fail)는 strong 선호(가중치≥1.3)에만 적용.
-            if vibe_list:
-                _vibe_w = get_vibe_weights(vibe_list)
-                # 점수 산출용: 7개 모두 (vibe_weights 로 가중 평균)
-                infra = calc_infra_score(
-                    float(mrow["cand_x"]), float(mrow["cand_y"]),
-                    INFRA_KEYS, KAKAO_LOCAL_REST_API_KEY,
-                    vibe_weights=_vibe_w,
-                )
-                base["infra_score"]  = infra["infra_score"]
-                base["infra_detail"] = infra["infra_detail"]
-                # 1km 필터 — required_infra(strong) 만 적용
-                strict_set = set(required_infra or [])
-                base["infra_fail"]   = [f for f in infra["infra_fail"] if f in strict_set]
-            else:
-                base["infra_score"]  = None
-                base["infra_detail"] = {}
-                base["infra_fail"]   = []
+    def _score_property(job):
+        gu_name, dong_name, dong_confidence, ok_molit, mrow = job
+        base = mrow.to_dict()
+        base["data_source"]     = "국토부API"
+        base["시군구_2"]         = gu_name
+        base["읍면동"]           = dong_name
+        base["data_confidence"]  = dong_confidence
+        base["display_address"]  = (
+            f"서울특별시 {gu_name} {mrow.get('dong', dong_name)} {mrow.get('jibun','')}"
+            + (f" {mrow.get('building_name','')}" if mrow.get("building_name") else "")
+        ).strip()
 
-            # 실제 건물 좌표로 정밀 통근시간 계산 (혼잡계수 포함)
-            commute = calc_commute_both_ways(
-                float(mrow["cand_x"]), float(mrow["cand_y"]), work_x, work_y,
-                transport_mode, depart_hour, depart_min, arrive_hour, arrive_min,
+        # 가격 적정성 정보 추가
+        price_ctx = calc_price_context(mrow.to_dict(), ok_molit)
+        base.update({
+            "deal_recency":       price_ctx.get("deal_recency",""),
+            "vs_dong_median":     price_ctx.get("vs_dong_median",""),
+            "similar_area_range": price_ctx.get("similar_area_range",""),
+        })
+
+        # 생활 인프라 점수 계산 — vibe 가 설정되면 무조건 7개 인프라 점수 산출.
+        # (이전엔 required_infra(가중치≥1.3) 가 None 이면 계산을 아예 스킵해서,
+        #  vibe 다중선택 시 평균화로 임계값 미달 → 모든 매물 infra_score=0 표시되던 버그)
+        # 1km 초과 필터(infra_fail)는 strong 선호(가중치≥1.3)에만 적용.
+        if vibe_list:
+            _vibe_w = get_vibe_weights(vibe_list)
+            # 점수 산출용: 7개 모두 (vibe_weights 로 가중 평균)
+            infra = calc_infra_score(
+                float(mrow["cand_x"]), float(mrow["cand_y"]),
+                INFRA_KEYS, KAKAO_LOCAL_REST_API_KEY,
+                vibe_weights=_vibe_w,
             )
-            base.update(commute)
-            stage3_all.append(base)
-            time.sleep(SLEEP_BETWEEN_CALLS)
+            base["infra_score"]  = infra["infra_score"]
+            base["infra_detail"] = infra["infra_detail"]
+            # 1km 필터 — required_infra(strong) 만 적용
+            strict_set = set(required_infra or [])
+            base["infra_fail"]   = [f for f in infra["infra_fail"] if f in strict_set]
+        else:
+            base["infra_score"]  = None
+            base["infra_detail"] = {}
+            base["infra_fail"]   = []
+
+        # 실제 건물 좌표로 정밀 통근시간 계산 (혼잡계수 포함)
+        commute = calc_commute_both_ways(
+            float(mrow["cand_x"]), float(mrow["cand_y"]), work_x, work_y,
+            transport_mode, depart_hour, depart_min, arrive_hour, arrive_min,
+        )
+        base.update(commute)
+        return base
+
+    stage3_all = _pmap(_score_property, jobs,
+                       on_done=_span(50, 92, "매물별 통근 시간·생활 인프라를 계산하고 있어요"))
 
     print(f"  → 3단계 총 {len(stage3_all)}개 매물 처리 완료")
+    _progress(93, "점수를 매기고 청년정책을 확인하고 있어요")
 
     # 통근시간을 하나도 못 구했다면 '매물 없음'이 아니라 외부 경로 API 장애 (키·IP 인증 실패 등)
     if stage3_all and not any(r.get("api_ok") for r in stage3_all):
@@ -1875,6 +2097,7 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
             lambda r: generate_feature_tags(r, combined), axis=1
         )
 
+    _progress(100, "추천을 마쳤어요")
     return combined, seoul_avg
 
 
