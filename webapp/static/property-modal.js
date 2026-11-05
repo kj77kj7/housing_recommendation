@@ -103,7 +103,10 @@ function renderModalContent(r, idx) {
                        ? r.applicable_policies_total
                        : (r.applicable_policies ? r.applicable_policies.length : 0));
   const tagBits = [`<span class="tag-pill tag-pill--score">⭐ ${score}점</span>`];
-  if (r.commute_min != null) tagBits.push(`<span class="tag-pill tag-pill--commute">🚇 ${r.commute_min}분</span>`);
+  if (r.commute_min != null) {
+    const icon = (r.transport_mode || window._transportMode) === "car" ? "🚗" : "🚇";
+    tagBits.push(`<span class="tag-pill tag-pill--commute">${icon} ${r.commute_min}분</span>`);
+  }
   if (policyTotal > 0)       tagBits.push(`<span class="tag-pill tag-pill--policy">💚 청년정책 ${policyTotal}건</span>`);
   tagsEl.innerHTML = tagBits.join("");
 
@@ -369,12 +372,10 @@ function renderModalPolicies(r) {
   subtitleEl.textContent = `${nick}님께 적용 가능한 정책 ${total}건`;
   propNameEl.textContent = `${r.gu || ""} ${r.dong || ""} 기준 매물`.trim();
 
-  // 절감액 합계 (eligible 정책의 benefit_amount_manwon 합)
-  const eligibleSum = policies
-    .filter(p => p.eligibility_status === "eligible")
-    .reduce((sum, p) => sum + (Number(p.benefit_amount_manwon) || 0), 0);
-  if (eligibleSum > 0) {
-    savingsEl.textContent = `최대 ${formatBenefitAmount(eligibleSum)}`;
+  // 신청가능 건수 (예전엔 대출 한도·월 지원금 등 성격이 다른 금액을 단순 합산해 '최대 N만원'으로 표시 → 오해 소지)
+  const eligibleCount = policies.filter(p => p.eligibility_status === "eligible").length;
+  if (eligibleCount > 0) {
+    savingsEl.textContent = `신청가능 ${eligibleCount}건`;
     savingsEl.style.display = "";
   } else {
     savingsEl.style.display = "none";
@@ -393,10 +394,11 @@ function renderModalPolicies(r) {
   const visible = policies.slice(0, _modalShownCount);
   listEl.innerHTML = visible.map(renderPolicyItem).join("");
 
-  // "더 보기" 버튼 (전체 N건 > 표시 N건일 때만)
-  if (total > visible.length) {
+  // "더 보기" 버튼 — 다음에 펼쳐질 건수를 그대로 표시 (예전엔 남은 전체 건수를 표시해 숫자가 안 맞았음)
+  const remaining = policies.length - visible.length;
+  if (remaining > 0) {
     showMoreBtn.style.display = "block";
-    showMoreBtn.textContent = `더 보기 (${total - visible.length}건 더)`;
+    showMoreBtn.textContent = `더 보기 (${Math.min(5, remaining)}건${remaining > 5 ? ` / 남은 ${remaining}건` : ""})`;
   } else {
     showMoreBtn.style.display = "none";
   }

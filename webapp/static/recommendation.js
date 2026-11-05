@@ -36,6 +36,7 @@ let _currentView = "card";   // card | map
 let _workplaceCoords = null;  // /api/recommend 응답에서 채움 {lat, lon} or null
 let _allowedMinutes  = null;  // 통근 허용 분 (반경 원)
 let _transportMode   = null;  // "car" | "transit"
+let _condChips       = null;  // 결과와 같은 세션의 검색 조건 (서버가 결과와 함께 내려줌)
 // 주: _expenseCache 는 property-modal.js 에서 const 선언됨.
 //     양쪽 파일이 같이 로드되면 중복 선언으로 SyntaxError 발생하므로 여기서는 선언하지 않음.
 
@@ -55,14 +56,17 @@ document.addEventListener("DOMContentLoaded", () => {
     navMap.classList.remove("disabled");
     navMap.href = "/recommendation?view=map";
     navMap.addEventListener("click", (e) => {
-      // 같은 페이지 안에서는 SPA-like 동작: URL 갱신 + 뷰 전환
+      // 같은 페이지 안에서는 SPA-like 동작: URL 갱신 + 뷰 전환 (뒤로가기로 카드뷰 복귀 가능)
       if (location.pathname === "/recommendation") {
         e.preventDefault();
-        history.replaceState(null, "", "/recommendation?view=map");
-        switchView("map");
+        if (_currentView !== "map") switchView("map", true);
       }
     });
   }
+  window.addEventListener("popstate", () => {
+    const v = new URLSearchParams(location.search).get("view") === "map" ? "map" : "card";
+    if (v !== _currentView) switchView(v, false);
+  });
 
   const sessionId = localStorage.getItem("rec_session_id");
   if (!sessionId) {
@@ -88,6 +92,7 @@ document.addEventListener("DOMContentLoaded", () => {
       window._workplaceCoords = _workplaceCoords;  // property-modal.js 가 참조
       _allowedMinutes = parsed.allowed_minutes ?? null;
       _transportMode  = parsed.transport_mode  ?? null;
+      _condChips      = parsed.cond_chips      ?? null;
       if (_allResults.length) {
         renderPage();
         return;
@@ -139,6 +144,7 @@ async function loadResults(sessionId) {
       window._workplaceCoords = _workplaceCoords;
       _allowedMinutes = data.allowed_minutes ?? null;
       _transportMode  = data.transport_mode  ?? null;
+      _condChips      = data.cond_chips      ?? null;
 
       // sessionStorage 에 캐싱 — mypage·favorites 등 다른 페이지가 활용
       // (이전엔 챗봇의 POST 완료 시점에 app.js 가 저장했으나, 사용자가 추천 중
@@ -151,11 +157,12 @@ async function loadResults(sessionId) {
         workplace_lon:   data.workplace_lon,
         allowed_minutes: data.allowed_minutes,
         transport_mode:  data.transport_mode,
+        cond_chips:      data.cond_chips || null,
       }));
       localStorage.setItem("rec_result_count", String(_allResults.length));
 
       if (!_allResults.length) {
-        showError("조건에 맞는 추천 결과가 없어요. 조건을 조정해 보세요.");
+        showError("조건에 맞는 추천 결과가 없어요. 챗봇에서 조건을 조정해 보세요.", true);
         return;
       }
       renderPage();
@@ -164,8 +171,8 @@ async function loadResults(sessionId) {
 
     if (data.status === "error") {
       const rawErr = data.error || "";
-      let displayErr = "추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.";
-      if (rawErr.includes("kakao") || rawErr.includes("ConnectionPool") || rawErr.includes("getaddrinfo"))
+      let displayErr = data.user_message || "추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.";
+      if (!data.user_message && (rawErr.includes("kakao") || rawErr.includes("ConnectionPool") || rawErr.includes("getaddrinfo")))
         displayErr = "주소 검색 서비스에 연결할 수 없어요.\n네트워크 연결을 확인하고 다시 시도해 주세요.";
       showError(displayErr);
       return;
@@ -200,15 +207,23 @@ function attachControlHandlers() {
   }
   // 카드뷰/지도뷰
   viewBtns.forEach(btn => {
-    btn.addEventListener("click", () => switchView(btn.dataset.view));
+    btn.addEventListener("click", () => {
+      if (btn.dataset.view !== _currentView) switchView(btn.dataset.view, true);
+    });
   });
 }
 
 // ── 뷰 전환 (사이드바·URL 파라미터·토글 버튼 공통) ─────────
-function switchView(view) {
+function switchView(view, pushHistory) {
   _currentView = view;
   viewBtns.forEach(b => b.classList.toggle("active", b.dataset.view === _currentView));
   const isMap = _currentView === "map";
+  if (pushHistory) history.pushState(null, "", isMap ? "/recommendation?view=map" : "/recommendation");
+  // 사이드바 active 표시 (지도뷰인데 '주거 추천'이 선택돼 보이던 문제)
+  const navRecEl = document.querySelector('#sidebar a.nav-item[href="/recommendation"]');
+  const navMapEl = document.getElementById("nav-map");
+  if (navRecEl) navRecEl.classList.toggle("active", !isMap);
+  if (navMapEl) navMapEl.classList.toggle("active", isMap);
   mapViewEl.style.display = isMap ? "block" : "none";
   topCardWrap.style.display = isMap ? "none" : "";
   gridEl.style.display = isMap ? "none" : "";
@@ -264,7 +279,7 @@ function renderMapMarkers() {
     _kakaoMarkers.push(marker);
 
     // 라벨 (매물명·점수·가격) — 마커 위에 떠 있는 박스
-    const labelHtml = renderMapLabel(r);
+    const labelHtml = renderMapLabel(r, idx);
     const overlay = new kakao.maps.CustomOverlay({
       map: _kakaoMap,
       position: pos,
@@ -321,7 +336,7 @@ function renderMapMarkers() {
 }
 
 // 매물 마커 위 라벨 HTML
-function renderMapLabel(r) {
+function renderMapLabel(r, idx) {
   const score = r.score != null ? r.score : 0;
   let priceTxt = "";
   if (r.rent_type === "월세" && r.monthly_rent_manwon) {
@@ -329,21 +344,16 @@ function renderMapLabel(r) {
   } else if (r.deposit_manwon) {
     priceTxt = `보증 ${Number(r.deposit_manwon).toLocaleString()}만`;
   }
-  const name = (r.address || (r.gu + " " + r.dong) || "").replace(/"/g, "&quot;");
+  const name = r.address || (r.gu + " " + r.dong) || "";
   return (
-    '<div class="rec-map-marker-label">' +
-      '<div class="rec-map-marker-name">' + escHtmlSafe(name) + '</div>' +
+    '<div class="rec-map-marker-label" onclick="openPropertyModal(' + Number(idx) + ')">' +
+      '<div class="rec-map-marker-name">' + escHtml(name) + '</div>' +
       '<div class="rec-map-marker-meta">' +
         '<span class="rec-map-marker-score">⭐ ' + score + '</span>' +
         (priceTxt ? '<span class="rec-map-marker-price">' + priceTxt + '</span>' : '') +
       '</div>' +
     '</div>'
   );
-}
-
-function escHtmlSafe(s) {
-  return String(s).replace(/[&<>"']/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 // 통근 시간 → 직선거리 반경(m). 도시 평균 이동속도 기반 단순 추정.
@@ -387,7 +397,7 @@ function renderPage() {
   localStorage.setItem("rec_result_count", String(results.length));
 
   // 컨트롤 카운트 버튼 라벨
-  if (countBtnEl) countBtnEl.textContent = `추천 개수: ${results.length}개 ▼`;
+  if (countBtnEl) countBtnEl.textContent = `추천 ${results.length}개`;
 
   // 검색 조건 바
   renderConditionBar();
@@ -421,7 +431,10 @@ let _initialViewApplied = false;
 
 // ── 조건 바 렌더링 (localStorage 기반) ──────────────────
 function renderConditionBar() {
-  const chips = JSON.parse(localStorage.getItem("rec_cond_chips") || "[]");
+  let chips = Array.isArray(_condChips) ? _condChips : null;
+  if (!chips) {
+    try { chips = JSON.parse(localStorage.getItem("rec_cond_chips") || "[]"); } catch { chips = []; }
+  }
   if (!chips.length) {
     condBarEl.style.display = "none";
     // 사이드바도 숨김
@@ -474,7 +487,7 @@ function renderTopCard(r, idx) {
   // 태그칩 (정책 점수는 v6.0부터 사용 안 함)
   const tags = [];
   if (r.infra_score)  tags.push(`🏪 편의시설 ${r.infra_score}점`);
-  if (commute !== "–") tags.push(`🚇 통근 ${commute}분`);
+  if (commute !== "–") tags.push(`${commuteIcon(r)} 통근 ${commute}분`);
   if (policyTotal > 0) tags.push(`💚 청년정책 ${policyTotal}건`);
 
   return `
@@ -534,7 +547,7 @@ function renderRestCard(r, i) {
         <div class="rec-card-rank">${rank}위 추천</div>
         <div class="rec-card-addr">${escHtml(r.address || (r.gu + " " + r.dong))}</div>
         <div class="rec-card-price">${priceLine}</div>
-        <div class="rec-card-info">🚇 통근 ${commute}분 · 🏪 인프라 ${r.infra_score || 0}점 · ⭐ ${score}점</div>
+        <div class="rec-card-info">${commuteIcon(r)} 통근 ${commute}분 · 🏪 인프라 ${r.infra_score || 0}점 · ⭐ ${score}점</div>
         ${policyBadge}
       </div>
     </div>
@@ -576,9 +589,14 @@ function formatPriceLine(r) {
 }
 function formatPriceLineCompact(r) {
   if (r.rent_type === "월세" && r.monthly_rent_manwon) {
-    return `월 ${r.monthly_rent_manwon}만 / 보증 ${formatManwon(r.deposit_manwon, true)}`;
+    return `보증금 ${formatManwon(r.deposit_manwon, true)} / 월세 ${r.monthly_rent_manwon}만`;
   }
+  if (r.rent_type === "전세") return `전세 ${formatManwon(r.deposit_manwon, true)}`;
   return formatManwon(r.deposit_manwon || r.price_manwon);
+}
+
+function commuteIcon(r) {
+  return (r && (r.transport_mode || _transportMode)) === "car" ? "🚗" : "🚇";
 }
 function formatManwon(manwon, compact) {
   if (!manwon) return "–";
@@ -644,6 +662,7 @@ async function toggleFav(btn) {
         infra_score:         r.infra_score,
         applicable_policies:       r.applicable_policies || [],
         applicable_policies_total: r.applicable_policies_total || 0,
+        transport_mode:            r.transport_mode || _transportMode || null,
         // 찜 매물에 직장 좌표 영구 저장 — 찜목록 모달의 생활비 영수증 계산용
         // (sessionStorage 휘발성 의존 제거)
         workplace_lat:       _workplaceCoords && _workplaceCoords.lat,
@@ -702,44 +721,52 @@ function syncHeartButtons() {
 window.toggleFav = toggleFav;
 
 // ── 서울 평균 비교 ──────────────────────────────────────
+// seoulAvg: /api/recommend 의 seoul_avg — 서울 실거래 평균 (전세/월세 따로)
+//   { by_rent_type: { 전세: {avg_deposit, sample_size}, 월세: {avg_deposit, avg_monthly, sample_size} },
+//     price_per_m2 }
+// 1위 매물과 "같은 임대유형"의 서울 평균을 비교한다 (월세 검색 결과에도 전세 매물이 섞일 수 있음).
 function renderAvgSection(seoulAvg, results) {
   try {
-    const avgPrice   = seoulAvg?.avg_deposit ?? seoulAvg?.median_deposit ?? null;
-    const avgCommute = seoulAvg?.avg_commute  ?? null;
-    if (!avgPrice && !avgCommute) return;
-
     const top1 = results[0];
-    const items = [];
-    const top1Price = top1?.deposit_manwon || top1?.price_manwon;
-    if (avgPrice && top1Price) {
-      const diff = Math.round(top1Price - avgPrice);
-      const sign = diff < 0 ? "▼" : "▲";
-      const cls  = diff < 0 ? "rec-avg-good" : "rec-avg-bad";
-      items.push(`<div class="rec-avg-row">
-        <span class="rec-avg-label">💰 보증금</span>
-        <span>서울 평균 <b>${formatManwon(avgPrice)}</b> 대비</span>
-        <span class="${cls}">${sign} ${formatManwon(Math.abs(diff))}</span>
-      </div>`);
-    }
-    if (avgCommute && top1?.commute_min) {
-      const diff = Math.round(top1.commute_min - avgCommute);
-      const sign = diff < 0 ? "▼" : "▲";
-      const cls  = diff < 0 ? "rec-avg-good" : "rec-avg-bad";
-      items.push(`<div class="rec-avg-row">
-        <span class="rec-avg-label">🕐 통근 시간</span>
-        <span>서울 평균 <b>${Math.round(avgCommute)}분</b> 대비</span>
-        <span class="${cls}">${sign} ${Math.abs(diff)}분</span>
-      </div>`);
-    }
-    if (!items.length) return;
+    if (!seoulAvg || !seoulAvg.by_rent_type || !top1) return;
+    const rentType = top1.rent_type || (top1.monthly_rent_manwon > 0 ? "월세" : "전세");
+    const ref = seoulAvg.by_rent_type[rentType];
+    if (!ref) return;
 
-    avgContentEl.innerHTML = items.join("");
+    const rows = [];
+    const addRow = (label, avg, mine, fmt) => {
+      if (!avg || !mine) return;
+      const diff = Math.round(mine - avg);
+      const cls  = diff < 0 ? "rec-avg-good" : "rec-avg-bad";
+      const diffTxt = diff === 0 ? "같음" : `${diff < 0 ? "▼" : "▲"} ${fmt(Math.abs(diff))}`;
+      rows.push(`<div class="rec-avg-row">
+        <span class="rec-avg-label">${label}</span>
+        <span>1위 매물 vs 서울 ${escHtml(rentType)} 평균 <b>${fmt(avg)}</b></span>
+        <span class="${cls}">${diffTxt}</span>
+      </div>`);
+    };
+    addRow("💰 보증금", ref.avg_deposit, top1.deposit_manwon, v => formatManwon(v));
+    if (rentType === "월세") {
+      addRow("📅 월세", ref.avg_monthly, top1.monthly_rent_manwon, v => `${Math.round(v)}만원`);
+    }
+    if (!rows.length) return;
+
+    avgContentEl.innerHTML = rows.join("");
     avgSectionEl.style.display = "block";
   } catch (e) { /* 평균 없으면 조용히 숨김 */ }
 }
 
 // ── 상태 전환 ────────────────────────────────────────────
+const STATE_SUBTITLES = {
+  loading:      "추천 결과를 불러오는 중이에요",
+  error:        "추천 결과를 보여드리지 못했어요",
+  "no-session": "아직 추천 결과가 없어요",
+  results:      "최적의 동네를 찾았어요",
+};
+
 function showState(state) {
+  const subEl = document.getElementById("rec-page-subtitle");
+  if (subEl && STATE_SUBTITLES[state]) subEl.textContent = STATE_SUBTITLES[state];
   loadingEl.style.display   = state === "loading"    ? "flex"  : "none";
   errorEl.style.display     = state === "error"      ? "flex"  : "none";
   noSessionEl.style.display = state === "no-session" ? "flex"  : "none";
@@ -761,5 +788,6 @@ function escHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

@@ -18,13 +18,15 @@ FastAPI 백엔드
 import os
 import sys
 import io
+import json
 import uuid
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -47,7 +49,7 @@ from expense_module import (
     FOOD_BASELINE, TRANSPORT_BASELINE, LEISURE_BASELINE,
 )
 from webapp.database import init_db
-from webapp.auth import router as auth_router, decode_token
+from webapp.auth import router as auth_router, decode_token, require_user
 from webapp.password import router as password_router
 from webapp.user import router as user_router
 from webapp.checklist import router as checklist_router
@@ -58,7 +60,24 @@ from webapp.favorites import router as favorites_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    await _log_outbound_ip()
     yield
+
+
+async def _log_outbound_ip():
+    """서버의 외부(아웃바운드) IP 를 로그에만 남김 — ODsay 서버 IP 화이트리스트 확인용.
+
+    Railway 는 고정 IP 가 아니라 재배포·재시작 때 바뀔 수 있어, ODsay 가
+    ApiKeyAuthFailed 를 내면 이 로그의 IP 와 ODsay 에 등록된 IP 를 비교하면 된다.
+    (공개 엔드포인트로 노출하지 않음. 조회 실패해도 서버 시작에는 영향 없음)
+    """
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            ip = (await client.get("https://api.ipify.org")).text.strip()
+        print(f"[startup] 외부(아웃바운드) IP: {ip}  ← ODsay 서버 IP 에 등록돼 있어야 대중교통 경로 조회 가능")
+    except Exception as e:
+        print(f"[startup] 외부 IP 확인 실패 (무시): {type(e).__name__}")
 
 # ──────────────────────────────────────────────────────────
 app = FastAPI(title="집찾봇 API", lifespan=lifespan)
@@ -100,12 +119,51 @@ app.add_middleware(
 
 app.include_router(auth_router,      prefix="/auth",      tags=["인증"])
 app.include_router(password_router,  prefix="/password",  tags=["비밀번호"])
-app.include_router(user_router,      prefix="/user",      tags=["유저"])
-app.include_router(checklist_router, prefix="/checklist", tags=["체크리스트"])
-app.include_router(favorites_router, prefix="/favorites", tags=["찜목록"])
+# 개인 데이터 API — 토큰 필수 + 본인 user_id 만 허용 (require_user)
+_auth_required = [Depends(require_user)]
+app.include_router(user_router,      prefix="/user",      tags=["유저"],       dependencies=_auth_required)
+app.include_router(checklist_router, prefix="/checklist", tags=["체크리스트"], dependencies=_auth_required)
+app.include_router(favorites_router, prefix="/favorites", tags=["찜목록"],     dependencies=_auth_required)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# ──────────────────────────────────────────────────────────
+# 추천 로그 캡처 — 스레드별 stdout 라우팅
+# ──────────────────────────────────────────────────────────
+# 예전엔 추천 중 sys.stdout 자체를 StringIO 로 바꿨는데, 추천은 여러 스레드에서 동시에
+# 돌 수 있어 두 사용자의 로그가 섞이거나, 복원 순서가 꼬이면 서버 로그가 통째로 사라졌다.
+# 이제 sys.stdout 은 한 번만 이 라우터로 교체하고, capture() 한 스레드의 출력만
+# 해당 버퍼에도 복사한다 (서버 콘솔에도 그대로 남김).
+class _ThreadLocalStdout(io.TextIOBase):
+    def __init__(self, real):
+        self._real = real
+        self._local = threading.local()
+
+    def capture(self, buf):
+        self._local.buf = buf
+
+    def release(self):
+        self._local.buf = None
+
+    def write(self, s):
+        buf = getattr(self._local, "buf", None)
+        if buf is not None:
+            buf.write(s)
+        return self._real.write(s)
+
+    def flush(self):
+        self._real.flush()
+
+    @property
+    def encoding(self):
+        return getattr(self._real, "encoding", "utf-8")
+
+
+if not isinstance(sys.stdout, _ThreadLocalStdout):
+    sys.stdout = _ThreadLocalStdout(sys.stdout)
+_stdout_router: _ThreadLocalStdout = sys.stdout
+
 
 # ──────────────────────────────────────────────────────────
 # 세션 저장소 (프로세스 내 메모리)
@@ -113,10 +171,78 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 _sessions: Dict[str, ChatBot] = {}
 
 
+def _validate_workplace(address: str):
+    """직장 주소를 카카오로 실제 조회해 수도권 좌표인지 확인 → (ok, error_msg).
+
+    챗봇 단계에서 걸러야 몇 분짜리 추천을 돌린 뒤에야 실패하는 일이 없다.
+    카카오 키가 없는 환경(로컬 테스트 등)에서는 검사를 건너뛴다.
+    """
+    try:
+        from housing_recommendation_v5 import (
+            geocode_address_kakao_with_fallback, KAKAO_LOCAL_REST_API_KEY,
+        )
+    except Exception:
+        return True, ""
+    if not KAKAO_LOCAL_REST_API_KEY:
+        return True, ""
+    try:
+        x, y, _ = geocode_address_kakao_with_fallback(address, KAKAO_LOCAL_REST_API_KEY)
+    except Exception:
+        return False, (
+            f"'{address}' 주소를 찾지 못했어요 🤔\n"
+            "도로명 주소나 지하철역 이름으로 다시 알려주세요.\n(예: 강남구 테헤란로 521, 강남역)"
+        )
+    # 서울·수도권 범위 (대략적인 위경도 박스)
+    if not (36.9 <= float(y) <= 38.3 and 126.3 <= float(x) <= 127.9):
+        return False, (
+            "서울로 출퇴근하실 수 있는 수도권 직장만 추천할 수 있어요.\n"
+            "서울·경기·인천 지역의 직장 주소를 알려주세요."
+        )
+    return True, ""
+
+
 def _get_bot(session_id: str) -> ChatBot:
     if session_id not in _sessions:
-        _sessions[session_id] = ChatBot()
+        bot = ChatBot()
+        bot.address_validator = _validate_workplace
+        _sessions[session_id] = bot
     return _sessions[session_id]
+
+
+def _params_key(v5_params: dict) -> str:
+    """추천 조건 비교용 키 — 조건이 바뀌면 이전 추천 결과를 재사용하지 않는다."""
+    return json.dumps(v5_params, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _cond_chips(bot: ChatBot) -> list:
+    """추천 결과 페이지 요약 바에 표시할 검색 조건 (결과와 같은 세션 기준)."""
+    s = bot.slots
+    chips = []
+    if s.get("work_address"):
+        chips.append("📍 " + s["work_address"])
+    if s.get("transport_mode"):
+        chips.append("🚗 자가용" if s["transport_mode"] == "car" else "🚌 대중교통")
+    if s.get("rent_type") == "월세":
+        chips.append(f"💰 월세 보증금 {int(s.get('deposit_manwon') or 0):,}만원 / 월 {s.get('monthly_manwon') or 0}만원")
+    elif s.get("deposit_manwon"):
+        chips.append(f"💰 전세 {int(s['deposit_manwon']):,}만원")
+    if s.get("allowed_minutes"):
+        chips.append(f"🕐 통근 {s['allowed_minutes']}분 이내")
+    if s.get("house_type"):
+        chips.append("🏢 " + str(s["house_type"]))
+    if s.get("vibe"):
+        chips.append("🏘 " + ", ".join(s["vibe"]))
+    if s.get("use_youth_policy"):
+        chips.append("📋 청년정책 반영")
+    return chips
+
+
+def _error_payload(e: Exception) -> dict:
+    """추천 오류 → 프론트에 보낼 JSON (사용자용 문구 + 오류 코드)."""
+    from housing_recommendation_v5 import CommuteServiceError
+    if isinstance(e, CommuteServiceError):
+        return {"error": str(e), "error_code": "commute_service_unavailable", "user_message": e.user_message}
+    return {"error": str(e)}
 
 
 # ──────────────────────────────────────────────────────────
@@ -166,9 +292,14 @@ async def mypage_page():
     return FileResponse(str(STATIC_DIR / "mypage.html"))
 
 
-@app.get("/favorites")
-async def favorites_page():
-    return FileResponse(str(STATIC_DIR / "favorites.html"))
+# /favorites 는 찜 목록 API(GET /favorites?user_id=…)와 경로가 같아 일반 라우트로는 페이지가 가려진다.
+# user_id 없는 GET 만 페이지로 응답 (운영에선 Cloudflare Pages 가 페이지를 제공하므로 로컬 개발용).
+@app.middleware("http")
+async def _favorites_page(request: Request, call_next):
+    if (request.method == "GET" and request.url.path == "/favorites"
+            and "user_id" not in request.query_params):
+        return FileResponse(str(STATIC_DIR / "favorites.html"))
+    return await call_next(request)
 
 
 @app.get("/api/health")
@@ -286,8 +417,7 @@ def _run_recommendation_sync(bot: ChatBot) -> dict:
     csv_path = candidates[0]
 
     log_buf = io.StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = log_buf
+    _stdout_router.capture(log_buf)
     try:
         from housing_recommendation_v5 import run_recommendation
         final_df, seoul_avg = run_recommendation(
@@ -295,6 +425,8 @@ def _run_recommendation_sync(bot: ChatBot) -> dict:
             **v5_params,
         )
         results = _df_to_list(final_df)
+        for r in results:
+            r["transport_mode"] = v5_params.get("transport_mode")
         try:
             from housing_recommendation_v5 import (
                 geocode_address_kakao_with_fallback, KAKAO_LOCAL_REST_API_KEY,
@@ -314,11 +446,13 @@ def _run_recommendation_sync(bot: ChatBot) -> dict:
             "log":             log_buf.getvalue()[-2000:],
             "workplace_lat":   work_y,
             "workplace_lon":   work_x,
-            "allowed_minutes": v5_params.get("allowed_minutes"),
+            # v5_params 의 통근 허용 키는 allowed_commute_min (예전엔 없는 키를 읽어 항상 null)
+            "allowed_minutes": v5_params.get("allowed_commute_min"),
             "transport_mode":  v5_params.get("transport_mode"),
+            "cond_chips":      _cond_chips(bot),
         }
     finally:
-        sys.stdout = old_stdout
+        _stdout_router.release()
 
 
 @app.post("/api/recommend")
@@ -343,21 +477,32 @@ async def recommend(req: RecommendRequest):
     if bot._recommendation_lock is None:
         bot._recommendation_lock = asyncio.Lock()
 
-    # 1) 이미 완료된 결과가 있으면 즉시 반환
-    if bot._recommendation_status == "complete" and bot._recommendation_result:
+    # 조건이 바뀌었으면(수정하기 후 재추천) 이전 결과를 재사용하지 않음
+    params_key = _params_key(bot.get_v5_params())
+
+    def _cache_valid() -> bool:
+        return (bot._recommendation_status == "complete"
+                and bot._recommendation_result is not None
+                and getattr(bot, "_recommendation_params_key", None) == params_key)
+
+    # 1) 같은 조건으로 이미 완료된 결과가 있으면 즉시 반환
+    if _cache_valid():
         print(f"[추천 API] 캐시 hit session={req.session_id[:8]}")
         return bot._recommendation_result
 
     # 2) 락 획득 — 동시 호출은 대기 (먼저 들어온 호출이 작업 수행, 나머지는 대기)
     async with bot._recommendation_lock:
         # 락 안에서 다시 캐시 확인 (대기 중에 다른 호출이 완료했을 수 있음)
-        if bot._recommendation_status == "complete" and bot._recommendation_result:
+        if _cache_valid():
             print(f"[추천 API] 락 대기 중 캐시 채워짐 session={req.session_id[:8]}")
             return bot._recommendation_result
 
         # 3) 실제 작업 실행
         bot._recommendation_status = "running"
         bot._recommendation_error  = None
+        bot._recommendation_error_payload = None
+        bot._recommendation_result = None
+        bot._recommendation_params_key = params_key
         print(f"[추천 API] 작업 시작 session={req.session_id[:8]}")
         try:
             # 추천은 sync(blocking) — event loop 차단 막기 위해 thread executor 위에서 실행.
@@ -367,14 +512,16 @@ async def recommend(req: RecommendRequest):
             bot._recommendation_status = "complete"
             return result
         except Exception as e:
-            sys.stdout = sys.__stdout__  # 안전망
             elapsed = time.perf_counter() - t0
             import traceback
             print(f"[추천 API] 오류 {elapsed:.1f}s — {e}")
             traceback.print_exc()
+            payload = _error_payload(e)
             bot._recommendation_status = "error"
             bot._recommendation_error  = str(e)
-            return JSONResponse(status_code=500, content={"error": str(e)})
+            bot._recommendation_error_payload = payload
+            status = 503 if payload.get("error_code") else 500
+            return JSONResponse(status_code=status, content=payload)
 
 
 @app.get("/api/recommend/result")
@@ -398,7 +545,9 @@ async def recommend_result(session_id: str):
     if bot._recommendation_status == "running":
         return {"status": "running"}
     if bot._recommendation_status == "error":
-        return {"status": "error", "error": bot._recommendation_error or "추천 처리 중 오류"}
+        payload = getattr(bot, "_recommendation_error_payload", None) or {
+            "error": bot._recommendation_error or "추천 처리 중 오류"}
+        return {"status": "error", **payload}
     return {"status": "not_started"}
 
 
@@ -608,17 +757,19 @@ def _quick_options_for(slot: Optional[str], bot: ChatBot) -> list:
                 {"label": "300~400만원", "value": "③ 300~400만원"},
                 {"label": "400~500만원", "value": "④ 400~500만원"},
                 {"label": "500만원 이상", "value": "⑤ 500만원 이상"},
-                {"label": "모름(없음)",     "value": "⑥ 모름"},
+                {"label": "모름 · 소득 없음", "value": "⑥ 모름"},
             ]
         elif asked == "policy_no_house" and bot.slots.get("policy_no_house") is None:
             options = [
-                {"label": "무주택 (없음)", "value": "① 무주택"},
+                {"label": "무주택 (소유 없음)", "value": "① 무주택"},
                 {"label": "주택 소유",     "value": "② 주택 소유"},
                 {"label": "모름",          "value": "③ 모름"},
             ]
 
     # ── 일반 슬롯 옵션 수집 (정책 분기에서 매치 안 됐을 때만 진입) ──
-    if not options and slot == "transport_mode":
+    if options:
+        pass
+    elif slot == "transport_mode":
         options = [{"label": "자가용", "value": "자가용"}, {"label": "대중교통", "value": "대중교통"}]
     elif slot == "rent_type":
         options = [{"label": "전세", "value": "전세"}, {"label": "월세", "value": "월세"}]
@@ -650,13 +801,19 @@ def _quick_options_for(slot: Optional[str], bot: ChatBot) -> list:
     elif bot._asked_policy and bot.slots.get("use_youth_policy") is None:
         options = [{"label": "예", "value": "예"}, {"label": "아니요", "value": "아니요"}]
 
-    # 필수 슬롯이 1개 이상 입력됐으면 "이전으로 ↩" 추가
-    if bot._slot_fill_order:
-        options.append({"label": "이전으로 ↩", "value": "__PREV__"})
-
-    # 수정 진행 중(_edit_backup_slot 존재)이면 "수정 취소 ↩" 추가
-    # → 사용자가 잘못 누른 슬롯 수정을 원본 복원으로 빠져나갈 수 있게 함
+    # 수정 진행 중(_edit_backup_slot 존재)이면 "수정 취소 ↩" 만 추가
+    # → 잘못 누른 슬롯 수정을 원본 복원으로 빠져나갈 수 있게 함 ('이전으로'와 같이 두면 헷갈림)
     if getattr(bot, "_edit_backup_slot", None):
         options.append({"label": "수정 취소 ↩", "value": "__CANCEL_EDIT_ACTIVE__"})
+    # 필수 슬롯이 1개 이상 입력됐으면 "이전으로 ↩" 추가
+    elif bot._slot_fill_order:
+        options.append({"label": "이전으로 ↩", "value": "__PREV__"})
 
     return options
+
+
+# ── 프론트 정적 파일 (/style.css, /app.js …) ─────────────────
+# Cloudflare Pages 배포 기준으로 HTML 이 루트 경로(/app.js)를 참조하므로,
+# 로컬에서 FastAPI 로 함께 띄울 때도 같은 경로로 제공한다.
+# 반드시 파일 맨 끝 — 위에서 정의한 API 라우트가 먼저 매칭되도록.
+app.mount("/", StaticFiles(directory=str(STATIC_DIR)), name="frontend")

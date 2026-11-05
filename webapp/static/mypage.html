@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>집찾봇 — 내 정보</title>
   <link rel="stylesheet" href="/style.css" />
+  <script src="/config.js"></script>
+  <script src="/common.js"></script>
 </head>
 <body>
 <div id="app-page">
@@ -59,7 +61,6 @@
   <main id="page-main">
     <header class="page-header">
       <h1 class="page-title">내 정보</h1>
-      <button class="page-noti-btn" aria-label="알림">🔔</button>
     </header>
 
     <div class="page-body">
@@ -248,10 +249,10 @@
         <label class="policy-edit-label">학력</label>
         <div class="policy-edit-options" data-field="education_level">
           <button type="button" class="policy-edit-opt" data-value="">변경 안 함</button>
-          <button type="button" class="policy-edit-opt" data-value="고졸이하">고졸 이하</button>
-          <button type="button" class="policy-edit-opt" data-value="대학재학">대학 재학</button>
-          <button type="button" class="policy-edit-opt" data-value="대졸">대학 졸업</button>
-          <button type="button" class="policy-edit-opt" data-value="석박사">석·박사</button>
+          <button type="button" class="policy-edit-opt" data-value="고졸이하">고졸이하</button>
+          <button type="button" class="policy-edit-opt" data-value="대학재학">대학재학</button>
+          <button type="button" class="policy-edit-opt" data-value="대졸">대졸</button>
+          <button type="button" class="policy-edit-opt" data-value="석박사">석박사</button>
         </div>
       </div>
 
@@ -273,7 +274,7 @@
           <button type="button" class="policy-edit-opt" data-value="300~400만원">300~400만원</button>
           <button type="button" class="policy-edit-opt" data-value="400~500만원">400~500만원</button>
           <button type="button" class="policy-edit-opt" data-value="500만원 이상">500만원 이상</button>
-          <button type="button" class="policy-edit-opt" data-value="모름">모름(없음)</button>
+          <button type="button" class="policy-edit-opt" data-value="모름">모름 · 소득 없음</button>
         </div>
       </div>
 
@@ -329,23 +330,7 @@
       location.href = '/login';
     }
   })();
-  function handleLogout(e) {
-    e.preventDefault();
-    // 인증 데이터
-    localStorage.removeItem('token');
-    localStorage.removeItem('nickname');
-    localStorage.removeItem('user_id');
-    localStorage.removeItem('rec_session_id');
-    // 챗봇 세션 + 추천결과 전체 초기화
-    sessionStorage.removeItem('chat_history');
-    sessionStorage.removeItem('rec_results_cache');
-    sessionStorage.removeItem('chat_session_id');
-    sessionStorage.removeItem('rec_in_progress');
-    sessionStorage.removeItem('rec_in_progress_session');
-    location.href = '/login';
-  }
 </script>
-<script src="/config.js"></script>
 <script src="/property-modal.js"></script>
 <script src="/mypage.js"></script>
 </body>

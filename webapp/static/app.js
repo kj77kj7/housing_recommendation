@@ -38,6 +38,7 @@ function friendlyCommandLabel(cmd) {
 const CHAT_HISTORY_KEY = "chat_history";
 const REC_CACHE_KEY    = "rec_results_cache";
 const SESSION_ID_KEY   = "chat_session_id";
+const QUICK_OPTS_KEY   = "chat_quick_options";   // 마지막 빠른선택 버튼 (페이지 이동 후 복원용)
 
 // ── 인증 토큰 ────────────────────────────────────────────
 function getAuthHeaders() {
@@ -87,6 +88,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const history = getChatHistory();
     if (history.length) {
       restoreChatHistory(history);
+      restoreQuickOptions();
+      restoreResultButton();
     } else {
       // 새 세션(채팅 히스토리 없음) → 이전 추천 결과 배지 클리어
       localStorage.removeItem("rec_result_count");
@@ -125,7 +128,8 @@ inputEl.addEventListener("keydown", (e) => {
 });
 
 // ── 메시지 전송 ──────────────────────────────────────────
-async function sendMessage(text) {
+// label: 빠른선택 버튼으로 보낸 경우 말풍선에 보여줄 버튼 이름 (실제 전송값은 text)
+async function sendMessage(text, label) {
   const userText = (text !== undefined ? text : inputEl.value).trim();
   if (!userText || isWaiting) return;
 
@@ -135,12 +139,12 @@ async function sendMessage(text) {
 
   // ── 특수 명령: API 호출 없이 직접 처리 ──────────────────
   if (userText === "__START_REC__") {
-    appendUserMessage("추천 시작하기 🏠");
+    appendUserMessage(label || "추천 시작 🏠");
     startRecommendation(sessionId);
     return;
   }
   if (userText === "__EDIT__") {
-    appendUserMessage("수정하기 ✏️");
+    appendUserMessage(label || "수정하기 ✏️");
     showEditOptions();
     return;
   }
@@ -157,7 +161,7 @@ async function sendMessage(text) {
   // ── 나머지 명령 / 일반 텍스트 ────────────────────────────
   // __PREV__, __EDIT:*__ 은 raw command를 API에 전송하되
   // 사용자 버블에는 친절한 레이블을 표시
-  const displayText = friendlyCommandLabel(userText);
+  const displayText = label || friendlyCommandLabel(userText);
   appendUserMessage(displayText);
   setWaiting(true);
 
@@ -226,7 +230,10 @@ async function startRecommendation(sid) {
 
     if (!res.ok || data.error) {
       const rawErr = data.error || "";
-      if (rawErr.includes("kakao") || rawErr.includes("ConnectionPool") || rawErr.includes("getaddrinfo")) {
+      if (data.user_message) {
+        appendBotMessage(data.user_message);
+        renderAfterRecommendOptions();
+      } else if (rawErr.includes("kakao") || rawErr.includes("ConnectionPool") || rawErr.includes("getaddrinfo")) {
         appendBotMessage(
           "주소 검색 서비스 연결에 실패했어요.\n" +
           "네트워크를 확인하고 '주거 추천 결과 보기' 버튼으로 다시 시도해 주세요."
@@ -252,6 +259,7 @@ async function startRecommendation(sid) {
       workplace_lon:   data.workplace_lon,
       allowed_minutes: data.allowed_minutes,
       transport_mode:  data.transport_mode,
+      cond_chips:      data.cond_chips || null,
     }));
     localStorage.setItem("rec_result_count", String(count));
     enableRecNav();
@@ -266,6 +274,7 @@ async function startRecommendation(sid) {
       appendBotMessage(
         "조건에 맞는 매물이 없어요 😥\n조건을 조금 완화해서 다시 시도해 보세요."
       );
+      renderAfterRecommendOptions(false);
     }
   } catch (err) {
     appendBotMessage("추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
@@ -326,6 +335,7 @@ async function resumeRecommendationIfNeeded() {
           workplace_lon:   data.workplace_lon,
           allowed_minutes: data.allowed_minutes,
           transport_mode:  data.transport_mode,
+          cond_chips:      data.cond_chips || null,
         }));
         localStorage.setItem("rec_result_count", String(count));
         enableRecNav();
@@ -334,11 +344,13 @@ async function resumeRecommendationIfNeeded() {
           resultsBtnEl.classList.add("visible");
         } else {
           appendBotMessage("조건에 맞는 매물이 없어요 😥\n조건을 조금 완화해서 다시 시도해 보세요.");
+          renderAfterRecommendOptions(false);
         }
         return;
       }
       if (data.status === "error") {
-        appendBotMessage("추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
+        appendBotMessage(data.user_message || "추천 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.");
+        renderAfterRecommendOptions();
         return;
       }
       if (data.status === "not_started") {
@@ -358,6 +370,14 @@ async function resumeRecommendationIfNeeded() {
     sessionStorage.removeItem("rec_in_progress");
     sessionStorage.removeItem("rec_in_progress_session");
   }
+}
+
+// 추천이 0건이거나 실패한 뒤 — 바로 조건을 바꾸거나 다시 시도할 수 있게
+// withRetry: 오류일 때만 '다시 추천' (0건이면 같은 조건 재실행은 의미 없음 → 수정만)
+function renderAfterRecommendOptions(withRetry = true) {
+  const opts = [{ label: "수정하기 ✏️", value: "__EDIT__" }];
+  if (withRetry) opts.push({ label: "다시 추천 🔄", value: "__START_REC__" });
+  renderQuickOptions(opts);
 }
 
 // ── 수정하기: 항목 선택 버튼 표시 ───────────────────────
@@ -413,6 +433,7 @@ function resetChat() {
   sessionStorage.removeItem(CHAT_HISTORY_KEY);
   sessionStorage.removeItem(REC_CACHE_KEY);
   sessionStorage.removeItem(SESSION_ID_KEY);
+  sessionStorage.removeItem(QUICK_OPTS_KEY);
   sessionStorage.removeItem("rec_in_progress");
   sessionStorage.removeItem("rec_in_progress_session");
   // localStorage 추천 관련 초기화
@@ -487,26 +508,26 @@ function enableRecNav() {
 }
 
 // ── 말풍선 ───────────────────────────────────────────────
-function appendBotMessage(text, skipSave = false) {
+function appendBotMessage(text, skipSave = false, time = null) {
   removeTyping();
   if (!skipSave) saveChatMessage("bot", text);
   const group = document.createElement("div");
   group.className = "msg-group bot";
   group.innerHTML = `
-    <div class="bubble bot">${nl2br(escHtml(text))}</div>
-    <div class="msg-time">${nowTime()}</div>
+    <div class="bubble bot">${nl2br(boldify(escHtml(text)))}</div>
+    <div class="msg-time">${escHtml(time || nowTime())}</div>
   `;
   messagesEl.appendChild(group);
   scrollBottom();
 }
 
-function appendUserMessage(text, skipSave = false) {
+function appendUserMessage(text, skipSave = false, time = null) {
   if (!skipSave) saveChatMessage("user", text);
   const group = document.createElement("div");
   group.className = "msg-group user";
   group.innerHTML = `
     <div class="bubble user">${nl2br(escHtml(text))}</div>
-    <div class="msg-time">${nowTime()}</div>
+    <div class="msg-time">${escHtml(time || nowTime())}</div>
   `;
   messagesEl.appendChild(group);
   scrollBottom();
@@ -553,9 +574,28 @@ function getChatHistory() {
 
 function restoreChatHistory(history) {
   history.forEach(msg => {
-    if (msg.role === "bot") appendBotMessage(msg.text, true);
-    else                    appendUserMessage(msg.text, true);
+    if (msg.role === "bot") appendBotMessage(msg.text, true, msg.time);
+    else                    appendUserMessage(msg.text, true, msg.time);
   });
+}
+
+// 페이지 이동 후 돌아왔을 때 마지막 빠른선택 버튼 복원
+// (없으면 버튼 없이 텍스트만 남아 '추천 시작'을 누를 방법이 없었음)
+function restoreQuickOptions() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(QUICK_OPTS_KEY) || "null");
+    if (saved && saved.options && saved.options.length) {
+      renderQuickOptions(saved.options, saved.multi);
+    }
+  } catch { /* 무시 */ }
+}
+
+// 이미 받은 추천 결과가 있으면 '주거 추천 결과 보기' 버튼 다시 표시
+function restoreResultButton() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(REC_CACHE_KEY) || "null");
+    if (cached && cached.results && cached.results.length) resultsBtnEl.classList.add("visible");
+  } catch { /* 무시 */ }
 }
 
 // ── 빠른 옵션 ────────────────────────────────────────────
@@ -564,6 +604,7 @@ function restoreChatHistory(history) {
 function renderQuickOptions(options, multiSelect) {
   clearQuickOptions();
   if (!options || !options.length) return;
+  try { sessionStorage.setItem(QUICK_OPTS_KEY, JSON.stringify({ options, multi: !!multiSelect })); } catch { /* 무시 */ }
 
   const cmdOpts   = [];
   const multiOpts = [];
@@ -584,6 +625,16 @@ function renderQuickOptions(options, multiSelect) {
     btn.dataset.selected = "0";
     btn.onclick = () => {
       const isOn = btn.dataset.selected === "1";
+      // '상관없음'은 다른 항목과 함께 고를 수 없음 — 고르면 나머지 해제, 다른 항목을 고르면 '상관없음' 해제
+      const isAny = opt.value.includes("상관없음");
+      if (!isOn) {
+        quickOptEl.querySelectorAll('.quick-btn-multi[data-selected="1"]').forEach(other => {
+          if (other !== btn && (isAny || other.dataset.value.includes("상관없음"))) {
+            other.dataset.selected = "0";
+            other.classList.remove("quick-btn--checked");
+          }
+        });
+      }
       btn.dataset.selected = isOn ? "0" : "1";
       btn.classList.toggle("quick-btn--checked", !isOn);
     };
@@ -596,13 +647,12 @@ function renderQuickOptions(options, multiSelect) {
     submitBtn.className = "quick-btn quick-btn-submit";
     submitBtn.textContent = "선택 완료 →";
     submitBtn.onclick = () => {
-      const selected = Array.from(quickOptEl.querySelectorAll('.quick-btn-multi[data-selected="1"]'))
-        .map(b => b.dataset.value);
-      if (!selected.length) {
+      const chosen = Array.from(quickOptEl.querySelectorAll('.quick-btn-multi[data-selected="1"]'));
+      if (!chosen.length) {
         appendBotMessage("1개 이상 선택해주세요.", true);
         return;
       }
-      sendMessage(selected.join(" "));
+      sendMessage(chosen.map(b => b.dataset.value).join(" "), chosen.map(b => b.textContent).join(", "));
     };
     quickOptEl.appendChild(submitBtn);
   }
@@ -617,13 +667,14 @@ function renderQuickOptions(options, multiSelect) {
     );
     btn.className = "quick-btn" + (isPrev ? " quick-btn-prev" : "");
     btn.textContent = opt.label;
-    btn.onclick = () => sendMessage(opt.value);
+    btn.onclick = () => sendMessage(opt.value, opt.label);
     quickOptEl.appendChild(btn);
   });
 }
 
 function clearQuickOptions() {
   quickOptEl.innerHTML = "";
+  try { sessionStorage.removeItem(QUICK_OPTS_KEY); } catch { /* 무시 */ }
 }
 
 // ── 패널 업데이트 ────────────────────────────────────────
@@ -732,11 +783,17 @@ function escHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function nl2br(s) {
   return s.replace(/\n/g, "<br>");
+}
+
+// 이스케이프된 문자열의 **굵게** 를 <b> 로 (봇 메시지 마크다운 별표가 그대로 보이던 문제)
+function boldify(s) {
+  return s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
 }
 
 function nowTime() {

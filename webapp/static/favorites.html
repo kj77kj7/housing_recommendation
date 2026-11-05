@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>집찾봇 — 찜 목록</title>
   <link rel="stylesheet" href="/style.css" />
+  <script src="/config.js"></script>
+  <script src="/common.js"></script>
 </head>
 <body>
 <div id="app-page">
@@ -59,7 +61,6 @@
   <main id="page-main">
     <header class="page-header">
       <h1 class="page-title">찜 목록</h1>
-      <button class="page-noti-btn" aria-label="알림">🔔</button>
     </header>
 
     <div class="page-body">
@@ -148,23 +149,7 @@
       location.href = '/login';
     }
   })();
-  function handleLogout(e) {
-    e.preventDefault();
-    // 인증 데이터
-    localStorage.removeItem('token');
-    localStorage.removeItem('nickname');
-    localStorage.removeItem('user_id');
-    localStorage.removeItem('rec_session_id');
-    // 챗봇 세션 + 추천결과 전체 초기화
-    sessionStorage.removeItem('chat_history');
-    sessionStorage.removeItem('rec_results_cache');
-    sessionStorage.removeItem('chat_session_id');
-    sessionStorage.removeItem('rec_in_progress');
-    sessionStorage.removeItem('rec_in_progress_session');
-    location.href = '/login';
-  }
 </script>
-<script src="/config.js"></script>
 <script src="/property-modal.js"></script>
 <script src="/favorites.js"></script>
 </body>

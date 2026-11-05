@@ -103,15 +103,18 @@ REQUIRED_SLOTS = [
 ]
 
 SLOT_QUESTIONS = {
-    "work_address":      "직장 도로명 주소를 알려주세요.\n(예: 강남구 테헤란로 521)\n역명·건물명은 주소로 인식되지 않아요.",
+    "work_address":      "직장 주소나 지하철역을 알려주세요.\n(예: 강남구 테헤란로 521, 강남역)\n건물·회사 이름은 주소로 인식되지 않아요.",
     "transport_mode":    "출퇴근 수단은 자가용인가요, 대중교통인가요?",
     "rent_type":         "전세로 보실 건가요, 월세로 보실 건가요?",
-    "deposit_manwon":    "보증금(전세금)은 얼마 정도 생각하세요? (예: 1억5천만원)",
+    "deposit_manwon":    "전세금은 얼마 정도 생각하세요? (예: 1억5천만원)",
     "monthly_manwon":    "월세는 얼마까지 괜찮으세요? (예: 50만원)",
     "allowed_minutes":   "최대 통근 시간은 몇 분이에요? (예: 40분)",
     "house_type":        "주택 유형 선호가 있으신가요?\n① 오피스텔  ② 연립·다세대  ③ 상관없음",
     "weight_preference": "추천 우선순위를 선택해 주세요.\n① 통근 우선  ② 주거비 우선  ③ 균형  ④ 직접 설정",
 }
+
+# 월세일 때 보증금 질문 (전세금 문구·예시가 맞지 않아 따로 둠)
+DEPOSIT_QUESTION_MONTHLY = "월세 보증금은 얼마 정도 생각하세요? (예: 1000만원)"
 
 SLOT_DISPLAY = {
     "work_address":      "직장 주소",
@@ -228,6 +231,16 @@ class ChatBot:
         self._edit_backup_value: Any = None
         self._edit_backup_extra: Dict[str, Any] = {}
         self._edit_backup_done: bool = False
+        # ── 직장 주소 실제 조회 검증 (main.py 가 카카오 지오코딩 함수로 주입) ──
+        # (address) -> (ok: bool, error_msg: str). None 이면 형식 검사만 수행.
+        self.address_validator = None
+
+    # ── 질문 문구 (임대유형에 따라 달라지는 질문 처리) ──────────
+
+    def _slot_question(self, slot: str) -> str:
+        if slot == "deposit_manwon" and self.slots.get("rent_type") == "월세":
+            return DEPOSIT_QUESTION_MONTHLY
+        return SLOT_QUESTIONS[slot]
 
     # ── 필수 슬롯 확인 ──────────────────────────────────────
 
@@ -275,35 +288,36 @@ class ChatBot:
         missing = self._missing_required()
         if missing:
             self._last_asked_slot = missing[0]
-            return SLOT_QUESTIONS[missing[0]]
+            return self._slot_question(missing[0])
 
-        # 직접설정 선택 후 비율 입력 (10 기준 — 통근/주거비/인프라)
+        # 직접설정 선택 후 비율 입력 (통근/주거비/인프라 — 합이 10이 아니어도 비율로 환산)
         if self.slots.get("weight_preference") == "직접설정" and self.slots.get("weight_custom") is None:
             self._last_asked_slot = "weight_custom"
             return (
-                "통근·주거비·인프라 비율을 합 10 기준으로 입력해 주세요.\n"
-                "(예: 통근 6 주거비 3 인프라 1, 또는 6:3:1)\n"
+                "통근·주거비·인프라 비중을 숫자로 입력해 주세요.\n"
+                "(예: 통근 6 주거비 3 인프라 1, 또는 6:3:1 — 합이 10이 아니어도 비율로 계산해요)\n"
                 "※ 인프라는 동네 분위기를 선택했을 때만 반영됩니다."
             )
 
         # vibe 확인
+        # 앞선 답변에서 이미 분위기가 추출됐으면 질문만 건너뛰고 아래 청년정책 질문으로 진행
+        # (예전엔 여기서 None 을 반환해 '질문 끝'으로 처리 → 청년정책 질문이 통째로 생략됐다)
         if not self._asked_vibe:
             self._asked_vibe = True
-            if self.slots.get("vibe") is not None:
-                return None  # 이미 추출됨
-            self._last_asked_slot = "vibe"
-            if self.vibe_unrecognized:
+            if self.slots.get("vibe") is None:
+                self._last_asked_slot = "vibe"
+                if self.vibe_unrecognized:
+                    return (
+                        f"'{self.vibe_unrecognized}'은 통근시간으로 반영하실 수 있어요.\n"
+                        "동네 분위기 선호가 있으신가요?\n"
+                        "① 조용함 ② 번화함 ③ 청년활기 ④ 가족친화 ⑤ 자연친화 "
+                        "⑥ 편의 우선 ⑦ 운동·건강 ⑧ 카페·문화 ⑨ 상관없음"
+                    )
                 return (
-                    f"'{self.vibe_unrecognized}'은 통근시간으로 반영하실 수 있어요.\n"
                     "동네 분위기 선호가 있으신가요?\n"
                     "① 조용함 ② 번화함 ③ 청년활기 ④ 가족친화 ⑤ 자연친화 "
                     "⑥ 편의 우선 ⑦ 운동·건강 ⑧ 카페·문화 ⑨ 상관없음"
                 )
-            return (
-                "동네 분위기 선호가 있으신가요?\n"
-                "① 조용함 ② 번화함 ③ 청년활기 ④ 가족친화 ⑤ 자연친화 "
-                "⑥ 편의 우선 ⑦ 운동·건강 ⑧ 카페·문화 ⑨ 상관없음"
-            )
 
         # 청년정책 확인 (예/아니요)
         if not self._asked_policy:
@@ -373,10 +387,13 @@ class ChatBot:
         "9": "상관없음", "⑨": "상관없음",
     }
 
+    # "상관없음"은 슬롯이 채워졌음을 나타내는 값 — get_v5_params 에서 필터 없음(None)으로 변환.
+    # (예전엔 None 으로 저장해 '미입력'으로 취급 → 같은 질문 무한 반복)
+    HOUSE_ANY = "상관없음"
     _HOUSE_MAP = {
         "①": "오피스텔",
         "②": "연립다세대",
-        "③": None,
+        "③": HOUSE_ANY,
     }
     # 단순 숫자 "1"~"4"는 주소 등 다른 입력에서 오작동하므로 원문자만 사용
 
@@ -414,10 +431,11 @@ class ChatBot:
         # 단어 경계 숫자 폴백 (주소·문장 속 숫자 오작동 방지)
         if re.search(r"\b1\b", text): return "오피스텔"
         if re.search(r"\b2\b", text): return "연립다세대"
-        if re.search(r"\b3\b", text): return None
+        if re.search(r"\b3\b", text): return cls.HOUSE_ANY
         # 자연어 키워드 매칭 (LLM 추출 후 가드 통과용)
         if re.search(r"오피스텔", text): return "오피스텔"
         if re.search(r"연립|다세대|빌라", text): return "연립다세대"
+        if re.search(r"상관\s*없|아무거나|둘\s*다", text): return cls.HOUSE_ANY
         return None
 
     @classmethod
@@ -453,17 +471,44 @@ class ChatBot:
         s = re.sub(r"\s+", " ", s).strip()
         return s
 
+    # 서울로 통근하기 어려운 지역 (수도권 밖)
+    _FAR_REGION_RE = re.compile(
+        r"(부산|대구|광주광역|광주시|대전|울산|세종|강원|충북|충남|충청|전북|전남|전라|경북|경남|경상|제주)"
+    )
+
     @staticmethod
-    def _validate_work_address(text: str):
-        """(valid: bool, error_msg: str). 건물명 입력 거부.
+    def _restore_region_prefix(addr: str, user_text: str) -> str:
+        """LLM 이 뺀 '○○구'·'서울' 접두어를 사용자 원문에서 복원."""
+        m = re.search(r"((?:서울(?:특별시|시)?\s*)?[가-힣]+구)\s", user_text + " ")
+        if m and m.group(1).split()[-1] not in addr:
+            return f"{m.group(1)} {addr}".strip()
+        return addr
+
+    @classmethod
+    def _validate_work_address(cls, text: str):
+        """(valid: bool, error_msg: str). 형식 검사 — 건물명·무의미 문자열·수도권 밖 주소 거부.
 
         역명은 카카오 키워드 검색으로 좌표 조회 가능하므로 허용 (출구 무관, 역 중심 좌표 사용).
+        실제 존재 여부는 address_validator(카카오 조회)가 추가로 확인한다.
         """
         stripped = text.strip()
         if re.search(r"(코엑스|타워|몰|센터|빌딩|광장|마트|쇼핑|터미널)$", stripped.replace(" ", "")):
             return False, (
                 f"'{stripped}'은 건물·시설 이름이에요. 실제 도로명 주소를 입력해 주세요.\n"
                 "(예: 강남구 영동대로 513)"
+            )
+        # 완성형 한글 2자 이상 + 주소/역 형태여야 함 ('ㅁㄴㅇㄹ asdf' 같은 입력 거부)
+        hangul = re.findall(r"[가-힣]", stripped)
+        looks_like_address = re.search(r"[가-힣]+(로|길|동|가|역|구|시)(\s|\d|$)", stripped)
+        if len(hangul) < 2 or not looks_like_address:
+            return False, (
+                "주소를 이해하지 못했어요 🤔\n"
+                "도로명 주소나 지하철역 이름으로 알려주세요.\n(예: 강남구 테헤란로 521, 강남역)"
+            )
+        if cls._FAR_REGION_RE.search(stripped) and not re.search(r"서울|경기|인천", stripped):
+            return False, (
+                "서울로 출퇴근하실 수 있는 수도권 직장만 추천할 수 있어요.\n"
+                "서울·경기·인천 지역의 직장 주소를 알려주세요."
             )
         return True, ""
 
@@ -597,8 +642,8 @@ class ChatBot:
             return "200~300만원"
         if re.search(r"200\s*만원\s*이하|200이하|2백\s*이하", t):
             return "200만원 이하"
-        # 3) 만원 단위 직접 입력 → 가장 가까운 구간
-        m = re.search(r"(\d+)\s*만", t)
+        # 3) 만원 단위 직접 입력 → 가장 가까운 구간 ('월 250 정도요' 처럼 '만' 생략도 허용)
+        m = re.search(r"(\d+)\s*만", t) or re.search(r"(\d{2,4})", t)
         if m:
             amt = int(m.group(1))
             if   amt <= 200: return "200만원 이하"
@@ -645,6 +690,8 @@ class ChatBot:
         r"^(잘\s*지내|잘\s*있|날씨|심심|배고|피곤|힘들|바빠|뭐\s*해|뭐해|어때|요즘)",
         re.I,
     )
+    # 자기소개 요청
+    _WHO_RE = re.compile(r"(너는?|넌|당신은?)\s*(누구|뭐야|정체)|누구(세요|야|니)|이름이\s*뭐", re.I)
     # 집/이사 관련 의지 표현 (슬롯 질문으로 자연 연결)
     _HOUSING_INTENT_RE = re.compile(
         r"(집\s*(구하|찾|보)|이사|방\s*(구하|찾|보)|주거|살\s*곳|거주|전세|월세)",
@@ -658,6 +705,9 @@ class ChatBot:
         슬롯이 절반 이상 채워진 상태라면 잡담 감지 비활성화 (흐름 방해 방지).
         """
         t = text.strip()
+        # 자기소개 질문은 대화 중에도 답함 (무시하고 질문만 반복하면 고장난 것처럼 보임)
+        if self._WHO_RE.search(t):
+            return "저는 서울 공공데이터로 청년 주거지를 추천해 드리는 집찾봇이에요 🏠"
         # 슬롯이 3개 이상 채워진 중간 대화라면 잡담 처리 건너뜀
         filled_count = sum(1 for v in self.slots.values() if v is not None)
         if filled_count >= 3:
@@ -810,7 +860,7 @@ class ChatBot:
         self._last_asked_slot = target
         # 직전 질문 텍스트 복원
         if target in SLOT_QUESTIONS:
-            q = SLOT_QUESTIONS[target]
+            q = self._slot_question(target)
         elif target == "vibe":
             q = (
                 "동네 분위기 선호가 있으신가요?\n"
@@ -904,7 +954,7 @@ class ChatBot:
 
         # 슬롯별 질문 텍스트 결정
         if slot in SLOT_QUESTIONS:
-            q = SLOT_QUESTIONS[slot]
+            q = self._slot_question(slot)
         elif slot == "vibe":
             q = (
                 "동네 분위기 선호가 있으신가요?\n"
@@ -995,7 +1045,11 @@ class ChatBot:
             return self._edit_slot(_t[7:-2])
 
         if self._done:
-            return "이미 추천이 완료되었습니다. 새로 시작하려면 페이지를 새로고침해 주세요.", True, None
+            return (
+                "조건 입력이 모두 끝났어요 ✅\n"
+                "아래 '추천 시작'을 누르거나, '수정하기'로 조건을 바꿀 수 있어요.\n"
+                "처음부터 다시 하려면 위의 '새 추천 시작'을 눌러 주세요."
+            ), True, None
 
         self.turn += 1
         if self.turn > self.MAX_TURNS:
@@ -1007,10 +1061,11 @@ class ChatBot:
             # 다음에 물어볼 슬롯 질문과 자연스럽게 연결
             missing = self._missing_required()
             if missing:
-                next_q = SLOT_QUESTIONS[missing[0]]
+                next_q = self._slot_question(missing[0])
                 self._last_asked_slot = missing[0]
                 return f"{small_talk}\n\n{next_q}", False, None
-            return small_talk, False, None
+            next_q = self._next_question()
+            return (f"{small_talk}\n\n{next_q}" if next_q else small_talk), False, None
 
         # LLM 슬롯 추출
         new_slots = extract_slots_from_text(user_text, self.slots)
@@ -1034,6 +1089,14 @@ class ChatBot:
         if new_slots.get("use_youth_policy") is not None and self._last_asked_slot != "use_youth_policy":
             if not re.search(r"청년정책|정책\s*반영|정책\s*확인", user_text):
                 new_slots.pop("use_youth_policy", None)
+        # 월세 금액은 직접 물었을 때 또는 '월세/월 N' 이 명시됐을 때만 (보증금 답이 월세로 복제되는 문제)
+        if new_slots.get("monthly_manwon") is not None and self._last_asked_slot != "monthly_manwon":
+            if not re.search(r"월세|월\s*\d|매달|한\s*달", user_text):
+                new_slots.pop("monthly_manwon", None)
+        # 보증금도 마찬가지 — 월세 질문에 답한 금액이 보증금으로 들어가지 않게
+        if new_slots.get("deposit_manwon") is not None and self._last_asked_slot not in (None, "deposit_manwon"):
+            if not re.search(r"보증금|전세|억|천\s*만|예산", user_text):
+                new_slots.pop("deposit_manwon", None)
 
         # ── monthly_manwon / deposit_manwon LLM 결과 검증 및 보정 ────────────
         # LLM(Gemini)이 숫자/단위를 잘못 해석하는 경우 잦음:
@@ -1060,7 +1123,7 @@ class ChatBot:
         if self._last_asked_slot == "house_type":
             parsed = self._parse_house_choice(user_text)
             if parsed is not None:
-                new_slots["house_type"] = parsed if parsed else "__none__"
+                new_slots["house_type"] = parsed
 
         # ── 컨텍스트 인식 폴백 ──────────────────────────────
         # 봇이 직전에 특정 슬롯을 물어봤는데 LLM이 그 슬롯을 못 잡은 경우,
@@ -1073,6 +1136,8 @@ class ChatBot:
                 # 콤마/층 등 부속 정보 정제 후 검증
                 cleaned = self._clean_work_address(txt) or txt
                 valid, err = self._validate_work_address(cleaned)
+                if valid and self.address_validator:
+                    valid, err = self.address_validator(cleaned)
                 if valid:
                     new_slots["work_address"] = cleaned
                 else:
@@ -1113,8 +1178,12 @@ class ChatBot:
         # LLM이 추출한 work_address도 정제 후 검증
         if new_slots.get("work_address") and self.slots.get("work_address") is None:
             cleaned = self._clean_work_address(new_slots["work_address"]) or new_slots["work_address"]
+            # LLM 이 '마포구 월드컵북로 396' 에서 구 이름을 빼고 돌려주는 경우 사용자 입력의 구를 복원
+            cleaned = self._restore_region_prefix(cleaned, user_text)
             new_slots["work_address"] = cleaned
             valid, err = self._validate_work_address(cleaned)
+            if valid and self.address_validator:
+                valid, err = self.address_validator(cleaned)
             if not valid:
                 new_slots.pop("work_address")
                 if not _addr_err:
@@ -1128,7 +1197,7 @@ class ChatBot:
         if self._last_asked_slot == "house_type" and new_slots.get("house_type") is None:
             parsed = self._parse_house_choice(user_text)
             if parsed is not None:
-                new_slots["house_type"] = parsed if parsed else "__none__"
+                new_slots["house_type"] = parsed
 
         if self._last_asked_slot == "weight_preference" and new_slots.get("weight_preference") is None:
             parsed = self._parse_weight_choice(user_text)
@@ -1152,15 +1221,7 @@ class ChatBot:
             if pol is not None:
                 new_slots["use_youth_policy"] = pol
 
-        # house_type="__none__" → None 처리 (둘 다 상관없음)
-        if new_slots.get("house_type") == "__none__":
-            new_slots["house_type"] = "__skip__"
-
         self._merge_slots(new_slots)
-
-        # house_type 스킵 처리 — 필수에서 제외
-        if self.slots.get("house_type") == "__skip__":
-            self.slots["house_type"] = None  # 실제 v5에는 None 전달
 
         # 주소 검증 실패 시 다른 슬롯은 저장하되 work_address만 다시 묻기
         # (사용자 발화에서 LLM이 추출한 transport_mode·house_type 등을 보존해 UX 개선)
@@ -1174,7 +1235,7 @@ class ChatBot:
 
         if not self._is_slots_complete():
             miss = self._missing_required()
-            return SLOT_QUESTIONS[miss[0]], False, None
+            return self._slot_question(miss[0]), False, None
 
         self._done = True
         # 수정 작업이 정상 완료됐으면 백업 클리어 (취소 시점 지남)
@@ -1191,7 +1252,7 @@ class ChatBot:
         s = self.slots
         rt  = s.get("rent_type", "전세")
         dep = s.get("deposit_manwon", 0)
-        lines = ["조건이 모두 입력됐어요! 아래 버튼으로 추천을 시작하거나 조건을 수정할 수 있어요.\n", "**입력 조건 요약**"]
+        lines = ["조건이 모두 입력됐어요! 아래 버튼으로 추천을 시작하거나 조건을 수정할 수 있어요.\n", "📋 입력 조건 요약"]
         lines.append(f"- 직장: {s.get('work_address','')}")
         lines.append(f"- 이동수단: {'자가용' if s.get('transport_mode')=='car' else '대중교통'}")
         if rt == "월세":
@@ -1288,7 +1349,7 @@ class ChatBot:
             required_infra = [k for k in INFRA_KEYS if weights.get(k, 1.0) >= 1.3] or None
 
         ht = s.get("house_type")
-        housing_filter = [ht] if ht else None
+        housing_filter = [ht] if ht and ht != self.HOUSE_ANY else None
 
         user_info = None
         if use_policy:

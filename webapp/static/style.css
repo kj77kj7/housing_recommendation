@@ -2205,3 +2205,49 @@ body.modal-open {
 }
 .account-edit-input:focus { border-color: var(--green); }
 .account-edit-input::placeholder { color: #9CA3AF; }
+
+/* ══════════════════════════════════════════════════════
+   모바일 내비게이션 (☰ 메뉴 — common.js)
+   768px 이하에서 사이드바가 숨겨져 내 정보·찜·지도·로그아웃으로 갈 수 없던 문제
+══════════════════════════════════════════════════════ */
+.mobile-nav-btn { display: none; }
+.mobile-nav-backdrop { display: none; }
+@media (max-width: 768px) {
+  .mobile-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    margin-right: 10px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+    color: var(--fg);
+    font-size: 20px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .mobile-nav-btn + * { margin-right: auto; }
+  body.nav-open #sidebar {
+    display: flex !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(280px, 85vw);
+    z-index: 1000;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.18);
+  }
+  body.nav-open .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 999;
+  }
+}
+
+/* 추천 개수 — 클릭 동작 없는 표시용 라벨 */
+.rec-count-label { cursor: default; }

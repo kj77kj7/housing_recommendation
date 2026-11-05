@@ -112,6 +112,9 @@
 
 </div>
 <script>
+  // 이미 로그인된 경우 바로 이동
+  if (localStorage.getItem('token')) location.href = '/';
+
   let selectedGender = '';
 
   function selectGender(g) {

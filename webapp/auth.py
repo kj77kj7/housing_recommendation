@@ -12,7 +12,7 @@ from typing import Optional
 
 import bcrypt
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from jose import jwt
@@ -36,7 +36,18 @@ def _verify_password(password: str, hashed: str) -> bool:
     except Exception:
         return False
 
-SECRET_KEY = os.getenv("SECRET_KEY", "seoul-salai-dev-secret-key-2026")
+# JWT 서명 키 — 운영에서는 반드시 SECRET_KEY 환경변수로 설정.
+# 코드에 적힌 기본값은 저장소를 본 누구나 알 수 있으므로 운영(Railway)에서 미설정이면
+# 프로세스마다 무작위 키를 써서 토큰 위조를 막는다 (재시작 시 재로그인 필요).
+_DEV_SECRET_KEY = "seoul-salai-dev-secret-key-2026"
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        import secrets
+        SECRET_KEY = secrets.token_urlsafe(48)
+        print("[auth] ⚠ SECRET_KEY 미설정 — 임시 무작위 키 사용 중. Railway 환경변수에 SECRET_KEY 를 설정하세요.")
+    else:
+        SECRET_KEY = _DEV_SECRET_KEY
 ALGORITHM  = "HS256"
 TOKEN_EXPIRE_HOURS = 72
 
@@ -251,5 +262,32 @@ def decode_token(token: str) -> Optional[dict]:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except Exception:
         return None
+
+
+def require_user(request: Request) -> int:
+    """라우터 의존성 — 로그인 토큰 필수 + 요청한 user_id 가 토큰의 본인인지 검사.
+
+    /user/{user_id}, /favorites?user_id=, /checklist?user_id= 처럼 user_id 를
+    경로·쿼리로 받는 API 에서 다른 사람의 데이터를 조회·수정하지 못하게 막는다.
+    """
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    info = decode_token(token) if token else None
+    try:
+        uid = int(info.get("sub")) if info else None
+    except (TypeError, ValueError):
+        uid = None
+    if uid is None:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다")
+
+    claimed = request.path_params.get("user_id", request.query_params.get("user_id"))
+    if claimed is not None:
+        try:
+            claimed_id = int(claimed)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="잘못된 user_id 입니다")
+        if claimed_id != uid:
+            raise HTTPException(status_code=403, detail="본인 정보만 조회·수정할 수 있습니다")
+    return uid
 
 

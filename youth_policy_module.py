@@ -1015,6 +1015,85 @@ _RENT_TYPE_SUPPORT_FILTER: Dict[str, List[str]] = {
 }
 
 
+# 정책 이름·조건에 다른 임대유형 전용 표현이 있으면 제외
+# (support_type 이 '보증'/'대출' 처럼 공통이어도 실제로는 전세 전용인 정책이 있음 — 예: 버팀목)
+_RENT_TYPE_EXCLUSIVE_KEYWORDS: Dict[str, List[str]] = {
+    "전세": ["전세", "버팀목"],
+    "월세": ["월세"],
+}
+
+
+def _is_other_rent_type_only(p: dict, rent_type: str) -> bool:
+    """정책이 rent_type 과 다른 임대유형 전용이면 True."""
+    other = "전세" if rent_type == "월세" else "월세"
+    text = " ".join(str(p.get(k, "")) for k in ("policy_name", "benefit_desc", "extra_conditions"))
+    mentions_other = any(kw in text for kw in _RENT_TYPE_EXCLUSIVE_KEYWORDS[other])
+    mentions_self = any(kw in text for kw in _RENT_TYPE_EXCLUSIVE_KEYWORDS[rent_type])
+    return mentions_other and not mentions_self
+
+
+def _parse_manwon_amount(text: str) -> Optional[float]:
+    """'8천만원', '1억', '3억원', '60만원' → 만원 단위 숫자."""
+    t = text.replace(",", "").replace(" ", "")
+    m = re.match(r"(\d+(?:\.\d+)?)억(?:(\d+)천)?", t)
+    if m:
+        return float(m.group(1)) * 10000 + (int(m.group(2)) * 1000 if m.group(2) else 0)
+    m = re.match(r"(\d+)천", t)
+    if m:
+        return int(m.group(1)) * 1000.0
+    m = re.match(r"(\d+(?:\.\d+)?)만", t)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _price_caps(p: dict) -> Dict[str, float]:
+    """정책 조건 문구의 매물 가격 상한 추출 — {'monthly': 60, 'deposit': 8000} (만원)."""
+    text = " ".join(str(p.get(k, "")) for k in ("extra_conditions", "benefit_desc"))
+    caps: Dict[str, float] = {}
+    m = re.search(r"월세\s*([\d.,]+\s*만)\s*원?\s*이하", text)
+    if m:
+        v = _parse_manwon_amount(m.group(1))
+        if v is not None:
+            caps["monthly"] = v
+    m = re.search(r"보증금\s*([\d.,]+\s*(?:억(?:\s*\d+\s*천)?|천\s*만?|만))\s*원?\s*이하", text)
+    if m:
+        v = _parse_manwon_amount(m.group(1))
+        if v is not None:
+            caps["deposit"] = v
+    return caps
+
+
+def filter_policies_by_property(policies: List[dict],
+                                deposit_manwon=None,
+                                monthly_rent_manwon=None) -> List[dict]:
+    """매물 가격이 정책 조건(월세·보증금 상한)을 넘으면 제외.
+
+    match_policies_for_property 는 (자치구, 임대유형) 단위로 캐시되므로,
+    매물마다 다른 가격 조건은 이 함수로 한 번 더 거른다. 가격을 모르면(None) 통과.
+    """
+    def _num(v):
+        try:
+            f = float(v)
+            return None if f != f else f   # NaN → None
+        except (TypeError, ValueError):
+            return None
+
+    dep = _num(deposit_manwon)
+    mon = _num(monthly_rent_manwon)
+    out = []
+    for pol in policies:
+        caps = pol.get("_price_caps")
+        if caps is None:
+            caps = _price_caps(pol)
+        if mon is not None and "monthly" in caps and mon > caps["monthly"]:
+            continue
+        if dep is not None and "deposit" in caps and dep > caps["deposit"]:
+            continue
+        out.append(pol)
+    return out
+
+
 def _build_policy_tags(p: dict) -> List[str]:
     """정책 자격 조건을 사람이 읽을 수 있는 짧은 태그로 변환 (상위 2~3개)."""
     tags = []
@@ -1113,9 +1192,11 @@ def match_policies_for_property(
         if not _check_age(p, user_info.get("age", "")):              continue
         if not _check_employment(p, user_info.get("employment", "")):continue
         if not _check_education(p, user_info.get("education", "")):  continue
-        # 3. 임대유형
+        # 3. 임대유형 — support_type 화이트리스트 + 다른 임대유형 전용 정책 제외
         st = p.get("support_type", "")
         if rent_filter and st not in rent_filter:
+            continue
+        if rent_type in _RENT_TYPE_EXCLUSIVE_KEYWORDS and _is_other_rent_type_only(p, rent_type):
             continue
         # 4. 자격 평가
         status = _evaluate_policy_eligibility(p, user_info)

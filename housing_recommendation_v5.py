@@ -16,6 +16,7 @@ from youth_policy_module import (
     fetch_policies_for_gu, print_policy_section,
     reset_policy_cache,
     match_policies_for_property,   # v6.0 — 매물별 정책 매칭 (점수 X)
+    filter_policies_by_property,   # 매물 가격 조건(월세·보증금 상한) 반영
 )
 from feedback_module import collect_feedback, print_feedback_summary, get_feedback_count
 from vibe_module import get_vibe_weights, apply_vibe_to_infra_scores, INFRA_KEYS
@@ -128,6 +129,13 @@ GU_CENTER: Dict[str, Tuple[float, float]] = {
 # =========================================================
 class APIError(Exception):
     pass
+
+
+class CommuteServiceError(RuntimeError):
+    """모든 후보 매물의 통근시간 조회가 외부 API 오류로 실패 — '조건에 맞는 매물 없음'과 구분."""
+    def __init__(self, detail: str, user_message: str):
+        super().__init__(detail)
+        self.user_message = user_message
 
 def require_key(name, value):
     if not value or value.startswith("YOUR_"):
@@ -687,6 +695,34 @@ def load_housing_data(csv_path):
     df["환산보증금(만원)"]           = pd.to_numeric(df["환산보증금(만원)"],           errors="coerce")
     df["㎡당환산보증금_재계산(만원)"] = pd.to_numeric(df["㎡당환산보증금_재계산(만원)"], errors="coerce")
     return df
+
+
+def calc_seoul_rent_average(housing_df: pd.DataFrame) -> Dict[str, Any]:
+    """서울 전체 실거래 평균 (추천 결과 페이지 '서울 평균 대비 비교'용).
+
+    추천 결과에는 전세·월세 매물이 섞일 수 있으므로, 화면에서 매물의 임대유형과 같은
+    기준으로 비교하도록 전세/월세를 따로 계산한다.
+    price_per_m2(㎡당 환산보증금)는 전체 거래 기준 — CLI 출력의 시세 비교에서 사용.
+    """
+    def _mean(col, rows):
+        if col not in rows.columns:
+            return None
+        v = pd.to_numeric(rows[col], errors="coerce").mean()
+        return None if pd.isna(v) else round(float(v), 1)
+
+    by_rent_type = {}
+    if "전월세구분" in housing_df.columns:
+        for rt in ("전세", "월세"):
+            rows = housing_df[housing_df["전월세구분"] == rt]
+            by_rent_type[rt] = {
+                "avg_deposit": _mean("보증금(만원)", rows),
+                "avg_monthly": _mean("월세금(만원)", rows) if rt == "월세" else None,
+                "sample_size": int(len(rows)),
+            }
+    return {
+        "by_rent_type": by_rent_type,
+        "price_per_m2": _mean("㎡당환산보증금_재계산(만원)", housing_df),
+    }
 
 
 # =========================================================
@@ -1538,7 +1574,7 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
     work_x, work_y, _ = geocode_address_kakao_with_fallback(work_address, KAKAO_LOCAL_REST_API_KEY)
 
     housing_df        = load_housing_data(housing_csv_path)
-    seoul_avg_ppm     = float(housing_df["㎡당환산보증금_재계산(만원)"].mean())
+    seoul_avg         = calc_seoul_rent_average(housing_df)
     global_mean_price = float(housing_df["㎡당환산보증금_재계산(만원)"].mean())
     global_mean_dep   = float(housing_df["환산보증금(만원)"].mean())
     htypes            = housing_filter or ["연립다세대","오피스텔"]
@@ -1676,6 +1712,18 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
 
     print(f"  → 3단계 총 {len(stage3_all)}개 매물 처리 완료")
 
+    # 통근시간을 하나도 못 구했다면 '매물 없음'이 아니라 외부 경로 API 장애 (키·IP 인증 실패 등)
+    if stage3_all and not any(r.get("api_ok") for r in stage3_all):
+        errs = [r.get("am_error") or r.get("pm_error") for r in stage3_all if r.get("am_error") or r.get("pm_error")]
+        sample = (errs[0] if errs else "응답 없음")[:200]
+        service = "대중교통 경로(ODsay)" if transport_mode == "transit" else "자동차 경로(카카오모빌리티)"
+        print(f"  [통근 API 장애] {service} 조회 {len(stage3_all)}건 모두 실패 — {sample}")
+        raise CommuteServiceError(
+            f"{service} 조회 전면 실패: {sample}",
+            f"{service} 조회 서비스에 문제가 있어 통근 시간을 계산하지 못했어요.\n"
+            "조건 문제가 아니니 잠시 후 다시 시도해 주세요.",
+        )
+
     # ── 3단계 점수화 및 최종 선정 ─────────────────────────
     if stage3_all:
         s3_df = pd.DataFrame(stage3_all)
@@ -1723,20 +1771,27 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
             applicable_totals: list = []
             for _, row in s3_ok.iterrows():
                 gu = str(row.get("시군구_2", "")).strip()
-                key = (gu, rent_type_label)
+                # 매물 자체의 임대유형 기준 (월세 검색 결과에도 전세 매물이 섞일 수 있음)
+                prop_rent_type = str(row.get("rent_type") or rent_type_label)
+                key = (gu, prop_rent_type)
                 if key not in match_cache:
                     try:
                         # 프론트에서 5개씩 페이지네이션하므로 매칭된 전체를 반환
-                        pol_list, pol_total = match_policies_for_property(
-                            gu, rent_type_label, user_info, top_n=100
+                        pol_list, _ = match_policies_for_property(
+                            gu, prop_rent_type, user_info, top_n=100
                         )
-                        match_cache[key] = (pol_list, pol_total)
+                        match_cache[key] = pol_list
                     except Exception as e:
                         print(f"  [정책 매칭 오류] {gu}: {str(e)[:80]}")
-                        match_cache[key] = ([], 0)
-                pol_list, pol_total = match_cache[key]
+                        match_cache[key] = []
+                # 매물 가격 조건 (예: '월세 60만원 이하') 미충족 정책 제외
+                pol_list = filter_policies_by_property(
+                    match_cache[key],
+                    deposit_manwon=row.get("deposit_manwon"),
+                    monthly_rent_manwon=row.get("monthly_rent_manwon"),
+                )
                 applicable_lists.append(pol_list)
-                applicable_totals.append(pol_total)
+                applicable_totals.append(len(pol_list))
             s3_ok["applicable_policies"]       = applicable_lists
             s3_ok["applicable_policies_total"] = applicable_totals
             # 호환용 (구 코드가 참조할 수 있음, 정책 점수는 v6.0부터 항상 0)
@@ -1785,16 +1840,21 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
                 key = (gu, rent_type_label_fb)
                 if key not in fb_cache:
                     try:
-                        pol_list, pol_total = match_policies_for_property(
+                        pol_list, _ = match_policies_for_property(
                             gu, rent_type_label_fb, user_info, top_n=100
                         )
-                        fb_cache[key] = (pol_list, pol_total)
+                        fb_cache[key] = pol_list
                     except Exception as e:
                         print(f"  [정책 매칭 오류] {gu}: {str(e)[:80]}")
-                        fb_cache[key] = ([], 0)
-                pol_list, pol_total = fb_cache[key]
+                        fb_cache[key] = []
+                # 동 단위 fallback 은 매물 가격이 없으므로 사용자 예산 기준으로 가격 조건 확인
+                pol_list = filter_policies_by_property(
+                    fb_cache[key],
+                    deposit_manwon=None,
+                    monthly_rent_manwon=monthly_rent_manwon if monthly_rent_manwon > 0 else None,
+                )
                 fb_lists.append(pol_list)
-                fb_totals.append(pol_total)
+                fb_totals.append(len(pol_list))
             combined["applicable_policies"]       = fb_lists
             combined["applicable_policies_total"] = fb_totals
         else:
@@ -1815,7 +1875,7 @@ def run_recommendation(housing_csv_path, work_address, transport_mode,
             lambda r: generate_feature_tags(r, combined), axis=1
         )
 
-    return combined, seoul_avg_ppm
+    return combined, seoul_avg
 
 
 # =========================================================
@@ -2079,7 +2139,7 @@ def main():
     if fb_count > 0:
         print(f"\n  [이전 피드백] 누적 {fb_count}건의 피드백이 저장되어 있습니다.")
 
-    final_df, seoul_avg_ppm = run_recommendation(
+    final_df, seoul_avg = run_recommendation(
         housing_csv_path      = HOUSING_CSV_PATH,
         work_address          = work_address,
         transport_mode        = transport_mode,
@@ -2105,7 +2165,7 @@ def main():
     print_final_results(
         final_df, transport_mode,
         depart_h, depart_m, arrive_h, arrive_m,
-        seoul_avg_ppm, weight_commute, weight_housing,
+        seoul_avg["price_per_m2"], weight_commute, weight_housing,
         weight_infra         = weight_infra,
         allowed_commute_min  = int(allowed_input),
         user_info            = user_info,

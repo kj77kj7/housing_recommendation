@@ -82,6 +82,7 @@
           // 찜 시점에 저장한 직장 좌표 — 모달 생활비 영수증 계산용
           workplace_lat:        snap.workplace_lat,
           workplace_lon:        snap.workplace_lon,
+          transport_mode:       snap.transport_mode || null,
         };
       });
 
@@ -135,7 +136,7 @@
           <div class="fav-card-price">${formatPrice(f)}</div>
           <div class="fav-card-chips">
             <span class="fav-chip fav-chip--score">⭐ ${score}점</span>
-            ${f.commute_min != null ? `<span class="fav-chip fav-chip--commute">🚇 ${f.commute_min}분</span>` : ""}
+            ${f.commute_min != null ? `<span class="fav-chip fav-chip--commute">${f.transport_mode === "car" ? "🚗" : "🚇"} ${f.commute_min}분</span>` : ""}
             ${policyTotal > 0 ? `<span class="fav-chip fav-chip--policy">💚 청년정책 ${policyTotal}건</span>` : ""}
           </div>
         </div>
@@ -204,8 +205,7 @@
   // ── 유틸 ───────────────────────────────────────────
   function formatPrice(f) {
     if (f.rent_type === "월세" && f.monthly_rent_manwon) {
-      const won = Number(f.monthly_rent_manwon) * 10000;
-      return `보증금 ${formatManwon(f.deposit_manwon)} / 월세 ${won.toLocaleString()}원`;
+      return `보증금 ${formatManwon(f.deposit_manwon)} / 월세 ${Number(f.monthly_rent_manwon).toLocaleString()}만원`;
     }
     if (f.rent_type === "전세") return `전세 ${formatManwon(f.deposit_manwon)}`;
     return formatManwon(f.deposit_manwon);

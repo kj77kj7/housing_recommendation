@@ -59,6 +59,7 @@
   }
 
   // ── 정책 정보 ───────────────────────────────────────
+  let _profile = null;
   async function loadProfile() {
     try {
       const res = await fetch((window.API_BASE||"") + `/user/${userId}/profile`, {
@@ -66,6 +67,7 @@
       });
       if (!res.ok) return;
       const p = await res.json();
+      _profile = p;   // 편집 모달에서 현재 값을 미리 선택하는 데 사용
 
       document.getElementById("mp-policy-employment").textContent = p.employment_status || "–";
       document.getElementById("mp-policy-education").textContent  = p.education_level   || "–";
@@ -131,7 +133,7 @@
           <div class="mp-rec-card-price">${formatPrice(r)}</div>
           <div class="mp-rec-card-chips">
             <span class="mp-rec-chip mp-rec-chip--score">⭐ ${score}점</span>
-            ${r.commute_min != null ? `<span class="mp-rec-chip mp-rec-chip--commute">🚇 ${r.commute_min}분</span>` : ""}
+            ${r.commute_min != null ? `<span class="mp-rec-chip mp-rec-chip--commute">${r.transport_mode === "car" ? "🚗" : "🚇"} ${r.commute_min}분</span>` : ""}
             ${policyTotal > 0 ? `<span class="mp-rec-chip mp-rec-chip--policy">💚 청년정책 ${policyTotal}건</span>` : ""}
           </div>
         </div>
@@ -338,12 +340,15 @@
     const overlay = document.getElementById("policy-edit-overlay");
     if (!overlay) return;
 
-    // 모든 옵션 초기화 — "변경 안 함"을 기본 선택
+    // 현재 저장된 값을 미리 선택 (없으면 "변경 안 함")
+    // — 예전엔 항상 "변경 안 함"만 선택돼 지금 값이 무엇인지 모달에서 알 수 없었음
     overlay.querySelectorAll(".policy-edit-options").forEach(group => {
       const optsInGroup = group.querySelectorAll(".policy-edit-opt");
       optsInGroup.forEach(o => o.classList.remove("selected"));
-      const noop = group.querySelector('[data-value=""]');
-      if (noop) noop.classList.add("selected");
+      const cur = _profile ? _profile[group.dataset.field] : null;
+      const curBtn = (cur !== null && cur !== undefined && cur !== "")
+        ? group.querySelector(`[data-value="${String(cur)}"]`) : null;
+      (curBtn || group.querySelector('[data-value=""]'))?.classList.add("selected");
     });
 
     // 클릭 시 그룹 내 단일 선택 (이벤트 위임 — 한 번만 바인딩)
@@ -385,6 +390,8 @@
       if (!selected) return;
       const val = selected.dataset.value;
       if (val === "" || val == null) return;  // "변경 안 함" → 스킵
+      const cur = _profile ? _profile[field] : null;
+      if (cur !== null && cur !== undefined && String(cur) === val) return;  // 현재 값 그대로 → 스킵
       if (field === "has_own_house") {
         body[field] = parseInt(val, 10);
       } else {
@@ -441,8 +448,7 @@
   }
   function formatPrice(r) {
     if (r.rent_type === "월세" && r.monthly_rent_manwon) {
-      const won = Number(r.monthly_rent_manwon) * 10000;
-      return `보증금 ${formatManwon(r.deposit_manwon)} / 월세 ${won.toLocaleString()}원`;
+      return `보증금 ${formatManwon(r.deposit_manwon)} / 월세 ${Number(r.monthly_rent_manwon).toLocaleString()}만원`;
     }
     if (r.rent_type === "전세") return `전세 ${formatManwon(r.deposit_manwon)}`;
     return formatManwon(r.deposit_manwon || r.price_manwon);
